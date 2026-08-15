@@ -53,7 +53,7 @@ const EXTRACTION_MAX_OUTPUT_TOKENS = 8000;
  * normalisation in normalizeRestriction changes what a correct extraction of
  * unchanged source text would produce.
  */
-export const EXTRACTOR_VERSION = "2026-08-15-destination-area";
+export const EXTRACTOR_VERSION = "2026-08-15-postal-codes";
 
 // Runaway guard only: real carrier sources are a few kilobytes. Hitting this is
 // a signal that the source shape changed, so it is logged rather than silent.
