@@ -81,6 +81,19 @@ function cleanNullableString(value: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+// Sagawa closes a town list with a count, as in 門前町滝上（10町）. The count
+// annotates the list rather than naming a place, so it must not survive into an
+// area. A parenthesised sub-area such as 宝立町（大町泥木・二艘丹）is not a count
+// and is left alone.
+const TRAILING_COUNT_ANNOTATION =
+  /[（(]\s*\d+\s*(?:町|市|区|村|地区|地域|箇所|ヶ所|カ所|か所)\s*[)）]\s*$/;
+
+function stripCountAnnotation(value: string | null): string | null {
+  if (value === null) return null;
+  const stripped = value.replace(TRAILING_COUNT_ANNOTATION, "").trim();
+  return stripped.length > 0 ? stripped : null;
+}
+
 function normalizeRestriction(
   source: BinarySourceDocument,
   checkedAt: string,
@@ -90,7 +103,7 @@ function normalizeRestriction(
     carrier: source.carrier,
     prefecture: String(item.prefecture ?? "").trim(),
     city: cleanNullableString(item.city),
-    area: cleanNullableString(item.area),
+    area: stripCountAnnotation(cleanNullableString(item.area)),
     status: item.status === "partially_suspended" ? "partially_suspended" : "suspended",
     services: Array.isArray(item.services)
       ? [...new Set(item.services.map(String).map((value) => value.trim()).filter(Boolean))]
@@ -219,12 +232,16 @@ const RESTRICTION_RULES = [
   "city must contain the municipality or district-level name shown in the source (for example 輪島市, 鳳珠郡能登町).",
   "area is only for a locality below city, such as a town or a parenthesized sub-area.",
   "If the source says 輪島市（門前町西円山・別所谷町）, output city=輪島市 and area=門前町西円山・別所谷町.",
+  "area must contain place names only. Drop a bracketed count that annotates the list rather than naming a place: 小池町,下山町,門前町滝上（10町） becomes 小池町,下山町,門前町滝上.",
   "If area is non-null, city must also be non-null. Never output an area without its municipality.",
   "city may be null only when the restriction clearly applies to the entire prefecture.",
   "When one source row contains multiple municipalities, create separate records when their hierarchy can be determined from the source.",
   "Do not turn a delay-only row into a suspension record just because another section on the page contains suspensions.",
   "status must be suspended or partially_suspended.",
   "services must be an array of affected service/product names; use [] only when the source does not specify them.",
+  "reason must carry the cause the source gives for the suspension, quoted closely from it: 地震・大雨, 令和8年熊本地震の影響, 台風13号及び台風15号の影響.",
+  "The cause is often stated once in a heading or an opening sentence rather than in the row itself; apply it to the records that section covers.",
+  "reason may be null only when the source states no cause at all. Never invent one.",
 ] as const;
 
 function extractionInstructions(carrier: Carrier, outputContract: readonly string[]): string {

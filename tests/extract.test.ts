@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { extractRestrictions } from "../src/ai/terra.ts";
-import type { SourceDocument } from "../src/types/restriction.ts";
+import type { DeliveryRestriction, SourceDocument } from "../src/types/restriction.ts";
 
 // The cap the extractor documents. Kept here as a literal on purpose: reading it
 // from the module under test would make the assertions follow a regression.
@@ -179,4 +179,100 @@ test("extraction rejects a body that parses to something other than an array of 
   }));
 
   assert.match(error.message, /OpenAI extraction failed: output was not a JSON array of restrictions/);
+});
+
+/** Runs an extraction against a stubbed model reply and returns the records. */
+async function extractedRecords(records: unknown[]): Promise<DeliveryRestriction[]> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    status: "completed",
+    output_text: JSON.stringify(records),
+  });
+
+  try {
+    return await extractRestrictions(sagawaSource(), "key", "model");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+function sagawaSource(): SourceDocument {
+  return {
+    carrier: "sagawa",
+    url: "https://www2.sagawa-exp.co.jp/information/detail/320/",
+    text: "【お荷物のお預かり・お届けを停止している地域】石川県 輪島市 小池町,門前町滝上（10町）",
+  };
+}
+
+test("extraction instructs the model to carry the source's stated cause into reason", async () => {
+  const { body } = await captureExtractionRequest(yamatoSource("石川県 | 輪島市 |"));
+  const instructions = String(body.instructions);
+
+  assert.match(instructions, /reason must carry the cause/);
+  assert.match(
+    instructions,
+    /stated once in a heading or an opening sentence/,
+    "a cause stated once per section must reach every record it covers",
+  );
+  assert.match(instructions, /reason may be null only when the source states no cause/);
+  assert.match(instructions, /Never invent one/);
+});
+
+test("extraction instructs the model to keep counts out of area", async () => {
+  const { body } = await captureExtractionRequest(yamatoSource("石川県 | 輪島市 |"));
+
+  assert.match(String(body.instructions), /area must contain place names only/);
+  assert.match(String(body.instructions), /門前町滝上（10町）becomes|門前町滝上（10町） becomes/);
+});
+
+test("a count annotation the model leaves in area is stripped during normalization", async () => {
+  const [record] = await extractedRecords([{
+    prefecture: "石川県",
+    city: "輪島市",
+    area: "小池町,下山町,門前町滝上（10町）",
+    status: "suspended",
+    services: [],
+    reason: "地震・大雨",
+  }]);
+
+  assert.equal(record.area, "小池町,下山町,門前町滝上");
+  assert.equal(record.reason, "地震・大雨", "the stated cause must survive normalization");
+});
+
+test("normalization keeps a parenthesized sub-area that names places rather than counting them", async () => {
+  const records = await extractedRecords([
+    {
+      prefecture: "石川県",
+      city: "珠洲市",
+      area: "宝立町（大町泥木・大町・二艘丹）",
+      status: "suspended",
+      services: [],
+      reason: null,
+    },
+    {
+      prefecture: "石川県",
+      city: "輪島市",
+      // Half-width brackets and a spaced count must be handled too.
+      area: "門前町滝上 ( 10町 )",
+      status: "suspended",
+      services: [],
+      reason: null,
+    },
+  ]);
+
+  assert.equal(records[0].area, "宝立町（大町泥木・大町・二艘丹）");
+  assert.equal(records[1].area, "門前町滝上");
+});
+
+test("an area consisting only of a count annotation becomes null rather than an empty string", async () => {
+  const [record] = await extractedRecords([{
+    prefecture: "石川県",
+    city: "輪島市",
+    area: "（10町）",
+    status: "suspended",
+    services: [],
+    reason: null,
+  }]);
+
+  assert.equal(record.area, null);
 });
