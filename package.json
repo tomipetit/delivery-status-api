@@ -8,6 +8,9 @@
     "deploy": "wrangler deploy",
     "test": "node scripts/run-tests.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "key:issue": "node scripts/api-key.mjs issue",
+    "key:list": "node scripts/api-key.mjs list",
+    "key:revoke": "node scripts/api-key.mjs revoke",
     "db:migrate:local": "wrangler d1 migrations apply delivery-status --local",
     "db:migrate:remote": "wrangler d1 migrations apply delivery-status --remote"
   },

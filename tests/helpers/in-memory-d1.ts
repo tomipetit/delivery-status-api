@@ -28,10 +28,34 @@ export interface StoredSourceArticle {
   last_seen_at: string;
 }
 
+export interface StoredApiKey {
+  id: number;
+  name: string;
+  key_hash: string;
+  created_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+}
+
+export interface StoredRestrictionRow {
+  carrier: Carrier;
+  prefecture: string;
+  city: string | null;
+  area: string | null;
+  status: string;
+  services_json: string;
+  reason: string | null;
+  source_url: string;
+  source_published_at: string | null;
+  checked_at: string;
+}
+
 export function createInMemoryD1(options: {
   counts?: Partial<Record<Carrier, number>>;
   states?: Partial<Record<Carrier, StoredSourceState>>;
   articles?: StoredSourceArticle[];
+  apiKeys?: StoredApiKey[];
+  restrictions?: StoredRestrictionRow[];
 } = {}) {
   const counts: Record<Carrier, number> = {
     yamato: options.counts?.yamato ?? 0,
@@ -45,9 +69,15 @@ export function createInMemoryD1(options: {
   const articles = new Map<string, StoredSourceArticle>(
     (options.articles ?? []).map((article) => [`${article.carrier}|${article.source_url}`, { ...article }]),
   );
+  const apiKeys = new Map<number, StoredApiKey>(
+    (options.apiKeys ?? []).map((apiKey) => [apiKey.id, { ...apiKey }]),
+  );
+  const restrictionRows = (options.restrictions ?? []).map((row) => ({ ...row }));
   const batches: PreparedStatement[][] = [];
   const runs: PreparedStatement[] = [];
   let failNextBatch: Error | null = null;
+  let failNextApiKeyLookup: Error | null = null;
+  let apiKeyUsageWrites = 0;
 
   const executeStateUpsert = (statement: PreparedStatement): void => {
     const [carrierValue, fingerprintValue, sourceUrlsValue, checkedAtValue] = statement.values;
@@ -74,6 +104,19 @@ export function createInMemoryD1(options: {
         return statement;
       },
       async first<T>() {
+        if (/FROM\s+api_keys/i.test(statement.sql)) {
+          if (failNextApiKeyLookup !== null) {
+            const failure = failNextApiKeyLookup;
+            failNextApiKeyLookup = null;
+            throw failure;
+          }
+          const keyHash = String(statement.values[0]);
+          // Mirrors the SQL: a revoked row is simply not found.
+          const found = [...apiKeys.values()].find(
+            (apiKey) => apiKey.key_hash === keyHash && apiKey.revoked_at === null,
+          );
+          return (found === undefined ? null : { id: found.id, name: found.name }) as T | null;
+        }
         const carrier = statement.values[0] as Carrier;
         if (/SELECT\s+COUNT\(\*\)/i.test(statement.sql)) {
           return { count: counts[carrier] } as T;
@@ -84,6 +127,14 @@ export function createInMemoryD1(options: {
         throw new Error(`Unsupported first SQL: ${statement.sql}`);
       },
       async all<T>() {
+        if (/FROM\s+delivery_restrictions/i.test(statement.sql)) {
+          const carrier = statement.values[0] as Carrier | undefined;
+          return {
+            results: restrictionRows.filter(
+              (row) => carrier === undefined || row.carrier === carrier,
+            ) as T[],
+          };
+        }
         if (/FROM\s+carrier_source_articles/i.test(statement.sql)) {
           const carrier = statement.values[0] as Carrier;
           return {
@@ -96,6 +147,20 @@ export function createInMemoryD1(options: {
       },
       async run() {
         runs.push(statement);
+        if (/UPDATE\s+api_keys/i.test(statement.sql)) {
+          const [usedAt, id, dayStart] = statement.values;
+          const apiKey = apiKeys.get(Number(id));
+          // Mirrors the guarded WHERE clause: nothing is written when the key
+          // was already recorded during the current Tokyo calendar day.
+          if (
+            apiKey !== undefined
+            && (apiKey.last_used_at === null || apiKey.last_used_at < String(dayStart))
+          ) {
+            apiKey.last_used_at = String(usedAt);
+            apiKeyUsageWrites += 1;
+          }
+          return {};
+        }
         if (/INSERT\s+INTO\s+carrier_source_states/i.test(statement.sql)) {
           executeStateUpsert(statement);
           return {};
@@ -162,11 +227,33 @@ export function createInMemoryD1(options: {
     counts,
     states,
     articles,
+    apiKeys,
     batches,
     runs,
+    apiKeyUsageWrites: () => apiKeyUsageWrites,
     failOnce(error = new Error("simulated atomic batch failure")) {
       failNextBatch = error;
     },
+    failApiKeyLookupOnce(error = new Error("simulated D1 lookup failure")) {
+      failNextApiKeyLookup = error;
+    },
+  };
+}
+
+export function storedApiKey(
+  id: number,
+  name: string,
+  keyHash: string,
+  overrides: Partial<StoredApiKey> = {},
+): StoredApiKey {
+  return {
+    id,
+    name,
+    key_hash: keyHash,
+    created_at: "2026-08-01 00:00:00",
+    revoked_at: null,
+    last_used_at: null,
+    ...overrides,
   };
 }
 

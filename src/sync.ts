@@ -21,6 +21,7 @@ import {
   type CarrierSourceArticle,
 } from "./storage/source-articles";
 import { getCarrierSourceState, touchCarrierSourceState } from "./storage/source-states";
+import { checkedToday } from "./tokyo-day";
 import type { Carrier, DeliveryRestriction, SourceDocument } from "./types/restriction";
 
 export interface SyncEnv {
@@ -53,21 +54,6 @@ function errorMessage(reason: unknown): string {
 function sourceTitleForLog(source: SourceDocument): string {
   if (!source.title) return "(none)";
   return source.title.replace(/\s+/g, " ").trim().slice(0, 160) || "(none)";
-}
-
-function tokyoCalendarDate(value: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Tokyo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(value);
-}
-
-function checkedToday(lastCheckedAt: string, now: Date): boolean {
-  const previous = new Date(lastCheckedAt);
-  return Number.isFinite(previous.getTime())
-    && tokyoCalendarDate(previous) === tokyoCalendarDate(now);
 }
 
 async function storeCarrierRestrictions(

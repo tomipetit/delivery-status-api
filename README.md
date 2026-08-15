@@ -32,7 +32,20 @@
 
 ## Endpoints
 
+認証は`Authorization: Bearer <キー>`で行います。キーには2種類あります。
+
+| 種類 | 保管場所 | `GET /api/v1/restrictions` | `POST /api/v1/sync` |
+| --- | --- | --- | --- |
+| 管理キー（`API_KEY`） | Workers secret | 可 | 可 |
+| クライアントキー | D1の`api_keys` | 可 | 403 Forbidden |
+
+`POST /api/v1/sync`は管理キー専用です。同期はOpenAI APIの費用が発生し、各社の公式サイトへも接続するため、利用者へ渡すキーから実行できないようにしています。認証に失敗した場合（未知のキー・失効済みのキー・ヘッダーなし・形式不正）はすべて401を返します。キー照合中にD1がエラーになった場合も認可せず401とします。
+
+`API_KEY`は管理キーとして残します。クライアントキーが1本もない場合や、すべて失効させた場合の復旧経路になります。
+
 ### Health check
+
+認証不要です。
 
 ```http
 GET /health
@@ -42,7 +55,7 @@ GET /health
 
 ```http
 GET /api/v1/restrictions
-Authorization: Bearer <API_KEY>
+Authorization: Bearer <管理キーまたはクライアントキー>
 ```
 
 配送会社で絞り込みできます。
@@ -57,7 +70,13 @@ GET /api/v1/restrictions?carrier=japan_post
 
 ```http
 POST /api/v1/sync
-Authorization: Bearer <API_KEY>
+Authorization: Bearer <管理キー>
+```
+
+クライアントキーで呼び出した場合は403を返します。
+
+```json
+{ "error": "Forbidden" }
 ```
 
 通常はCron Triggerから1日1回自動実行します。手動同期にも同じ差分キャッシュが適用されます。
@@ -120,6 +139,56 @@ npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put API_KEY
 ```
 
+## APIキーの管理
+
+利用者ごとのクライアントキーはD1の`api_keys`テーブルで管理し、CLIから発行・一覧・失効します。HTTPの管理用エンドポイントは用意していません。
+
+本番でクライアントキーを使う前に、マイグレーション`0003_api_keys.sql`を適用してください。適用前は`api_keys`が存在せず、クライアントキーでの認証は行えません（管理キーは従来どおり利用できます）。
+
+```bash
+npm run db:migrate:remote
+```
+
+### 発行
+
+```bash
+npm run key:issue -- --name "shop-a"
+npm run key:issue -- --name "shop-a" --remote
+```
+
+`dsa_live_`で始まるキーを生成し、平文はこのときだけ表示します。接頭辞はログやシークレットスキャナーで識別しやすくするためのものです。
+
+```text
+target: LOCAL database "delivery-status"
+
+issued API key for "shop-a" (id 1)
+target: LOCAL database "delivery-status"
+
+dsa_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+D1にはSHA-256ハッシュだけを保存します。平文は保存も記録もしないため、後から取り出すことはできません。**紛失した場合は復旧ではなく、失効させて再発行します。**
+
+### 一覧
+
+```bash
+npm run key:list
+npm run key:list -- --remote
+```
+
+`id`・`name`・`created_at`・`revoked_at`・`last_used_at`を表示します。ハッシュしか保存していないため、キー本体が表示されることはありません。`last_used_at`は日本時間の日付単位で更新するため、同じ日に何度呼び出されても書き込みは1回です。
+
+### 失効
+
+```bash
+npm run key:revoke -- --id 1
+npm run key:revoke -- --name "shop-a" --remote
+```
+
+`revoked_at`を設定します。失効済みのキーや存在しないキーを指定した場合はエラーとして報告し、何も変更しません。失効後のキーでのリクエストは401になります（403ではありません）。
+
+`--remote`を付けない限り、すべてローカルDBが対象です。実行時は対象DB（`LOCAL` / `REMOTE (production)`）を必ず出力します。
+
 ## Development
 
 ```bash
@@ -178,18 +247,27 @@ src/
 │   └── yamato.ts
 ├── source-fingerprint.ts
 ├── storage/
+│   ├── api-keys.ts
 │   ├── restrictions.ts
 │   ├── source-articles.ts
 │   └── source-states.ts
 ├── types/
 │   └── restriction.ts
 ├── index.ts
-└── sync.ts
+├── sync.ts
+└── tokyo-day.ts
+
+scripts/
+├── api-key.mjs
+└── run-tests.mjs
 ```
+
+`tokyo-day.ts`は日本時間のカレンダー日判定を提供し、同期の「今日は確認済みか」とAPIキーの`last_used_at`更新の両方で共有します。
 
 ## Known limitations
 
 - 佐川急便は1日1回、公式の重要なお知らせXMLを取得します。Web検索は使わず、新規記事または公式XMLのタイトル・公開日が変わった記事の本文だけをAIで正規化します。日本郵便はPDFが変わった場合だけ、そのPDFを添付した抽出を1回実行します。検索ツールは使わないため、検索ツールの利用料は発生しません。
 - 日本郵便は公式PDFのURLを直接取得して読むため、検索インデックスへの登録状況には依存しません。ただしPDFのURLや形式が変わった場合は同期失敗として既存データを保持します。佐川急便は公式XMLの構造に依存するため、配信形式が変わった場合は同期失敗として既存データを保持します。
 - ヤマト運輸でAI抽出結果が0件になった場合は、「停止地域なし」を直接証明できないため既存データを保持します。
-- 郵便番号の付与、D1の変更履歴、同期失敗通知、APIのレート制限は未実装です。
+- 郵便番号の付与、D1の変更履歴、同期失敗通知、APIのレート制限は未実装です。ただしクライアントキーの導入でリクエストの発行元を特定できるようになったため、キー単位のレート制限は実装可能になりました（本リポジトリでは未実装）。
+- クライアントキーはSHA-256ハッシュのみを保存します。平文を復元する手段はないため、紛失時は失効・再発行で対応します。
