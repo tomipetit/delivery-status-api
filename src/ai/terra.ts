@@ -119,9 +119,20 @@ function normalizeRestriction(
 function isValidRestriction(item: DeliveryRestriction): boolean {
   if (!item.prefecture) return false;
 
-  // A town/area without its municipality is unsafe for delivery decisions.
-  if (item.area && !item.city) return false;
-
+  // An `area` with no `city` used to be rejected here. That rule existed to stop
+  // an orphan town name such as 門前町西円山: town names repeat across
+  // municipalities, so a town on its own cannot be matched against an address.
+  // It also threw away every area that is legitimately not under a municipality
+  // — 喜界島, 徳之島, 奄美大島 and other island or regional names sit directly
+  // under a prefecture and are unambiguous there. Dropping them turned an
+  // island-limited suspension into what reads as the whole prefecture, and the
+  // alternative the model reached for, forcing 喜界島 into `city`, produced a
+  // confident false negative for a consumer matching `city` against 大島郡喜界町.
+  //
+  // The orphan-town protection now lives in the extraction instructions alone:
+  // nothing here can tell an island apart from a bare town name, so the rule
+  // requiring a town-level area to carry its municipality must stay explicit in
+  // RESTRICTION_RULES.
   return true;
 }
 
@@ -227,14 +238,21 @@ const RESTRICTION_RULES = [
   "A table under a 遅れ or 遅延 heading in the same article describes delays only and must not be returned.",
   "Exclude mere delays, shortened business hours, shortened pickup cut-off times, and records explicitly saying pickup/delivery is still operating.",
   "Phrases such as お届けに遅れ, 遅延, 大幅な遅れ, 遅延了承のうえお預かり, 集荷・配達を行っております, and 集荷・配達を実施 indicate that the row must not be returned as a suspension.",
+  "This API reports restrictions on the destination only: every record names a region that items cannot currently be sent to.",
+  "When a source separates an origin side (差出地域, 引受地域, 発地, 発送元) from a destination side (宛先地域, 配達地域, 着地, お届け先), return a row only when the restricted region sits on the destination side, and record that destination region.",
+  "A row reading 全国 ⇒ 熊本県 下益城郡美里町、八代市… is a destination restriction: return the 熊本県 regions. The mirrored row 熊本県 下益城郡美里町、八代市… ⇒ 全国 restricts the origin only and must produce no record at all.",
+  "General principle: a restriction that applies only to items originating in a region, destined anywhere, is out of scope and must be returned as nothing. Never record the origin region as if it were the destination.",
+  "Yamato's 左記地域を発着とするお荷物 covers both directions, so it includes the destination and must be returned; a Yamato 配達地 column names a destination.",
+  "Sagawa's 全国から上記地域へのお荷物のお預かり（荷受け）は停止 restricts the destination and must be returned; an article restricting only dispatch from a region to anywhere must not be.",
   "Do not invent, infer, or autocomplete a location that is not present in the source.",
   "prefecture must contain the prefecture name (for example 石川県).",
-  "city must contain the municipality or district-level name shown in the source (for example 輪島市, 鳳珠郡能登町).",
-  "area is only for a locality below city, such as a town or a parenthesized sub-area.",
-  "If the source says 輪島市（門前町西円山・別所谷町）, output city=輪島市 and area=門前町西円山・別所谷町.",
+  "city must contain the municipality or district-level name shown in the source (for example 輪島市, 鳳珠郡能登町). Fill city whenever the source names a municipality.",
+  "When the source names a sub-prefecture area that is not a municipality — an island, an island group, or a regional designation — put that name in area and leave city null.",
+  "鹿児島県 喜界島・徳之島・沖永良部島・与論島・奄美大島 becomes one record per island with prefecture=鹿児島県, city=null and area=喜界島, area=徳之島, and so on.",
+  "Never convert a non-municipal name into a municipality name the source does not state: 喜界島 must not become 大島郡喜界町.",
+  "A town-level name that the source presents beneath a municipality must still carry that municipality in city. If the source says 輪島市（門前町西円山・別所谷町）, output city=輪島市 and area=門前町西円山・別所谷町, never the town on its own.",
   "area must contain place names only. Drop a bracketed count that annotates the list rather than naming a place: 小池町,下山町,門前町滝上（10町） becomes 小池町,下山町,門前町滝上.",
-  "If area is non-null, city must also be non-null. Never output an area without its municipality.",
-  "city may be null only when the restriction clearly applies to the entire prefecture.",
+  "city may be null when the restriction covers the entire prefecture, in which case area is null too, or when the source names a non-municipal area, in which case area carries that name.",
   "When one source row contains multiple municipalities, create separate records when their hierarchy can be determined from the source.",
   "Do not turn a delay-only row into a suspension record just because another section on the page contains suspensions.",
   "status must be suspended or partially_suspended.",

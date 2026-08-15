@@ -276,3 +276,100 @@ test("an area consisting only of a count annotation becomes null rather than an 
 
   assert.equal(record.area, null);
 });
+
+test("a sub-prefecture area with no municipality survives validation instead of being dropped", async () => {
+  // 喜界島 and 徳之島 are islands, not municipalities. Rejecting them for having
+  // no city turned an island-limited suspension into either a whole-prefecture
+  // restriction or, worse, an island forced into city.
+  const records = await extractedRecords([
+    {
+      prefecture: "鹿児島県",
+      city: null,
+      area: "喜界島",
+      status: "suspended",
+      services: ["保冷扱いとするゆうパック"],
+      reason: "台風15号の影響",
+    },
+    {
+      prefecture: "鹿児島県",
+      city: null,
+      area: "徳之島",
+      status: "suspended",
+      services: ["保冷扱いとするゆうパック"],
+      reason: "台風15号の影響",
+    },
+  ]);
+
+  assert.equal(records.length, 2, "an area without a city must no longer be discarded");
+  assert.deepEqual(
+    records.map((record) => [record.prefecture, record.city, record.area]),
+    [["鹿児島県", null, "喜界島"], ["鹿児島県", null, "徳之島"]],
+  );
+  assert.deepEqual(records[0].services, ["保冷扱いとするゆうパック"]);
+});
+
+test("a whole-prefecture record and a municipality record still pass alongside an island record", async () => {
+  const records = await extractedRecords([
+    { prefecture: "沖縄県", city: null, area: null, status: "suspended", services: [], reason: null },
+    { prefecture: "鹿児島県", city: null, area: "奄美大島", status: "suspended", services: [], reason: null },
+    { prefecture: "熊本県", city: "八代市", area: null, status: "suspended", services: [], reason: null },
+    { prefecture: "石川県", city: "輪島市", area: "門前町西円山", status: "suspended", services: [], reason: null },
+  ]);
+
+  assert.equal(records.length, 4, "every city/area combination the schema allows must survive");
+});
+
+test("prefecture is still required, so a record without one is dropped", async () => {
+  const records = await extractedRecords([
+    { prefecture: "", city: null, area: "喜界島", status: "suspended", services: [], reason: null },
+    { prefecture: "   ", city: "八代市", area: null, status: "suspended", services: [], reason: null },
+    { prefecture: "鹿児島県", city: null, area: "与論島", status: "suspended", services: [], reason: null },
+  ]);
+
+  assert.deepEqual(
+    records.map((record) => record.area),
+    ["与論島"],
+    "relaxing the area/city rule must not relax the prefecture rule",
+  );
+});
+
+test("extraction instructs the model to report destination restrictions only", async () => {
+  const { body } = await captureExtractionRequest(yamatoSource("石川県 | 輪島市 |"));
+  const instructions = String(body.instructions);
+
+  assert.match(instructions, /reports restrictions on the destination only/);
+  assert.match(
+    instructions,
+    /差出地域, 引受地域[^\n]*宛先地域, 配達地域/,
+    "the model must be told which column headings mark origin and which mark destination",
+  );
+  assert.match(
+    instructions,
+    /originating in a region, destined anywhere, is out of scope/,
+    "the general origin-only principle must be stated, not just the sample rows",
+  );
+  assert.match(instructions, /熊本県[^\n]*⇒ 全国[^\n]*no record/);
+  assert.match(instructions, /発着とするお荷物[^\n]*must be returned/);
+  assert.match(instructions, /お預かり（荷受け）は停止[^\n]*must be returned/);
+});
+
+test("extraction instructs the model to keep a non-municipal area out of city", async () => {
+  const { body } = await captureExtractionRequest(yamatoSource("石川県 | 輪島市 |"));
+  const instructions = String(body.instructions);
+
+  assert.match(instructions, /put that name in area and leave city null/);
+  assert.match(instructions, /喜界島 must not become 大島郡喜界町/);
+  assert.match(instructions, /Fill city whenever the source names a municipality/);
+  // The orphan-town protection is now enforced by the prompt alone, so it must
+  // never be dropped from the instructions along with the code check.
+  assert.match(
+    instructions,
+    /beneath a municipality must still carry that municipality in city/,
+    "an orphan town name is still ambiguous and the prompt is the only thing stopping it",
+  );
+  assert.doesNotMatch(
+    instructions,
+    /If area is non-null, city must also be non-null/,
+    "the retired invariant must not linger in the prompt",
+  );
+});

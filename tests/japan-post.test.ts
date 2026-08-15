@@ -171,6 +171,40 @@ test("Japan Post extraction stamps the official PDF URL on every record it retur
   }
 });
 
+test("Japan Post extraction keeps one record per island for the 鹿児島 保冷ゆうパック row", async () => {
+  // 喜界島・徳之島・沖永良部島・与論島・奄美大島 are islands, not municipalities.
+  // They belong in area with city left null; the old validator dropped every one
+  // of them, which read as no restriction at all for 鹿児島県.
+  const islands = ["喜界島", "徳之島", "沖永良部島", "与論島", "奄美大島"];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => determinationResponse(
+    "active_restrictions_found",
+    islands.map((island) => ({
+      prefecture: "鹿児島県",
+      city: null,
+      area: island,
+      status: "suspended",
+      services: ["保冷扱いとするゆうパック"],
+      reason: "台風15号の影響",
+    })),
+  );
+
+  try {
+    const result = await extractRestrictionsFromPdf(japanPostSource, samplePdf(), "key", "model");
+
+    assert.equal(result.determination, "active_restrictions_found");
+    assert.deepEqual(result.restrictions.map((item) => item.area), islands);
+    for (const restriction of result.restrictions) {
+      assert.equal(restriction.prefecture, "鹿児島県");
+      assert.equal(restriction.city, null, "an island must not be promoted into city");
+      assert.deepEqual(restriction.services, ["保冷扱いとするゆうパック"]);
+      assert.equal(restriction.sourceUrl, pdfUrl);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Japan Post extraction returns an authoritative empty set for no_active_restrictions", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => determinationResponse("no_active_restrictions", []);
