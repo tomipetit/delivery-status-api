@@ -11,6 +11,7 @@ import {
   type SagawaArticleSummary,
 } from "./scrapers/sagawa";
 import { fetchYamatoStatus, yamatoFingerprintText } from "./scrapers/yamato";
+import { createMunicipalityRowCache, resolvePostalCodes } from "./postal/lookup";
 import { sha256Hex } from "./source-fingerprint";
 import {
   countCarrierRestrictions,
@@ -55,6 +56,46 @@ function errorMessage(reason: unknown): string {
 function sourceTitleForLog(source: SourceDocument): string {
   if (!source.title) return "(none)";
   return source.title.replace(/\s+/g, " ").trim().slice(0, 160) || "(none)";
+}
+
+/**
+ * Attaches official postal codes to every record, between extraction and
+ * storage.
+ *
+ * The model never produces postal codes and must never be asked to: they are
+ * deterministic data, and a language model asked for the code of a town emits
+ * plausible, well-formed numbers that belong to somewhere else entirely. They
+ * are looked up here, in the KEN_ALL dataset the Worker itself stores.
+ *
+ * The lookup is an enrichment, so it is guarded twice — `resolvePostalCodes`
+ * already swallows its own failures, and anything that still escapes is caught
+ * here. A restriction is never dropped and a sync is never failed over a
+ * missing postal code; the record simply carries none.
+ */
+async function withPostalCodes(
+  db: D1Database,
+  restrictions: DeliveryRestriction[],
+): Promise<DeliveryRestriction[]> {
+  const cache = createMunicipalityRowCache();
+  const enriched: DeliveryRestriction[] = [];
+  let resolved = 0;
+
+  for (const restriction of restrictions) {
+    let codes: string[] = [];
+    let level: DeliveryRestriction["postalCodeLevel"] = null;
+    try {
+      ({ codes, level } = await resolvePostalCodes(db, restriction, cache));
+    } catch (reason) {
+      console.warn(`[sync] postal lookup failed for ${restriction.prefecture}: ${errorMessage(reason)}`);
+    }
+    if (codes.length > 0) resolved += 1;
+    enriched.push({ ...restriction, postalCodes: codes, postalCodeLevel: level });
+  }
+
+  if (restrictions.length > 0) {
+    console.info(`[sync] postal codes: ${resolved}/${restrictions.length} record(s) carry codes`);
+  }
+  return enriched;
 }
 
 async function storeCarrierRestrictions(
@@ -158,7 +199,7 @@ async function syncYamato(
   await storeCarrierRestrictions(
     env,
     "yamato",
-    restrictions,
+    await withPostalCodes(env.DB, restrictions),
     counts,
     failures,
     fingerprint,
@@ -259,7 +300,7 @@ async function syncJapanPost(
   await storeCarrierRestrictions(
     env,
     "japan_post",
-    deduplicateRestrictions(result.restrictions),
+    await withPostalCodes(env.DB, deduplicateRestrictions(result.restrictions)),
     counts,
     failures,
     effectiveFingerprint,
@@ -385,8 +426,15 @@ async function syncSagawa(
   // Unlike Yamato, an empty result here is authoritative: the official list is
   // the complete set of current articles and every one of them was read, so
   // "no active restrictions" is a real determination and is stored as such.
-  const restrictions = deduplicateRestrictions(
-    currentArticles.flatMap(({ restrictions: articleRestrictions }) => articleRestrictions),
+  // Attached to the merged set rather than per article: the per-article cache
+  // deliberately keeps the extraction result only, so a change to the postal
+  // dataset reaches every stored record on the next sync without re-billing an
+  // extraction.
+  const restrictions = await withPostalCodes(
+    env.DB,
+    deduplicateRestrictions(
+      currentArticles.flatMap(({ restrictions: articleRestrictions }) => articleRestrictions),
+    ),
   );
   const fingerprint = `${versionPrefix}${await sha256Hex(JSON.stringify(
     currentArticles.map(({ sourceUrl, fingerprint: articleFingerprint }) => ({

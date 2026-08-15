@@ -574,3 +574,97 @@ test("every carrier fingerprint carries the extractor rules version", async () =
 
   assert.ok(EXTRACTOR_VERSION.length > 0, "the extractor version must never be empty");
 });
+
+/** Column order of the delivery_restrictions INSERT built in storage/restrictions.ts. */
+const POSTAL_CODES_JSON_INDEX = 7;
+const POSTAL_CODE_LEVEL_INDEX = 8;
+
+function storedRestrictionInserts(memory: ReturnType<typeof createInMemoryD1>) {
+  return memory.batches
+    .flat()
+    .filter((statement) => /INSERT\s+INTO\s+delivery_restrictions/i.test(statement.sql))
+    .map((statement) => ({
+      prefecture: statement.values[1],
+      city: statement.values[2],
+      area: statement.values[3],
+      postalCodes: JSON.parse(String(statement.values[POSTAL_CODES_JSON_INDEX])) as string[],
+      postalCodeLevel: statement.values[POSTAL_CODE_LEVEL_INDEX],
+    }));
+}
+
+const kenAllRows = [
+  { postal_code: "9272165", prefecture: "石川県", city: "輪島市", town: "門前町西円山ハ" },
+  { postal_code: "9272166", prefecture: "石川県", city: "輪島市", town: "別所谷町" },
+  { postal_code: "9280001", prefecture: "石川県", city: "輪島市", town: "以下に掲載がない場合" },
+];
+
+test("postal codes are attached from the dataset between extraction and storage", async () => {
+  const memory = createInMemoryD1({ states: currentSkipStates(), postalCodes: kenAllRows });
+  memory.states.delete("yamato");
+  let extractionCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url === yamatoUrl) return new Response(yamatoPage("輪島市"));
+    if (url !== openAiResponsesUrl) throw new Error(`Unexpected fetch: ${url}`);
+    extractionCalls += 1;
+    // The model is never asked for postal codes and never supplies them: they
+    // are deterministic data, and a model would invent plausible wrong ones.
+    const body = JSON.parse(String(init?.body)) as Record<string, any>;
+    assert.doesNotMatch(String(body.instructions), /郵便番号|postal/i);
+    return Response.json({ status: "completed", output_text: JSON.stringify([
+      { prefecture: "石川県", city: "輪島市", area: "門前町西円山・別所谷町", status: "suspended", services: ["宅急便"], reason: "大雨" },
+      { prefecture: "石川県", city: "輪島市", area: null, status: "suspended", services: ["宅急便"], reason: "大雨" },
+      { prefecture: "石川県", city: null, area: null, status: "suspended", services: ["宅急便"], reason: "大雨" },
+    ]) });
+  };
+
+  try {
+    assert.equal((await quietSync(() => syncAll(env(memory.db)))).yamato, 3);
+    assert.equal(extractionCalls, 1);
+    assert.deepEqual(storedRestrictionInserts(memory).map(({ postalCodes, postalCodeLevel }) => ({
+      postalCodes,
+      postalCodeLevel,
+    })), [
+      { postalCodes: ["9272165", "9272166"], postalCodeLevel: "town" },
+      { postalCodes: ["9272165", "9272166", "9280001"], postalCodeLevel: "city" },
+      { postalCodes: [], postalCodeLevel: "prefecture" },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a failing postal lookup never drops a restriction or fails the sync", async () => {
+  const memory = createInMemoryD1({ states: currentSkipStates(), postalCodes: kenAllRows });
+  memory.states.delete("yamato");
+  memory.failPostalLookups();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = requestUrl(input);
+    if (url === yamatoUrl) return new Response(yamatoPage("輪島市"));
+    if (url !== openAiResponsesUrl) throw new Error(`Unexpected fetch: ${url}`);
+    return Response.json({ status: "completed", output_text: JSON.stringify([{
+      prefecture: "石川県", city: "輪島市", area: "門前町西円山", status: "suspended",
+      services: ["宅急便"], reason: "大雨",
+    }]) });
+  };
+
+  try {
+    assert.equal(
+      (await quietSync(() => syncAll(env(memory.db)))).yamato,
+      1,
+      "postal codes are an enrichment; losing them must not cost the restriction",
+    );
+    assert.deepEqual(storedRestrictionInserts(memory), [{
+      prefecture: "石川県",
+      city: "輪島市",
+      area: "門前町西円山",
+      postalCodes: [],
+      postalCodeLevel: null,
+    }]);
+    assert.equal(memory.counts.yamato, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

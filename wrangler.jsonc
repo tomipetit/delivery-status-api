@@ -11,7 +11,11 @@
 	},
 	"triggers": {
 		"crons": [
-			"0 0 * * *"
+			// Daily carrier sync: 09:00 JST.
+			"0 0 * * *",
+			// Monthly postal-code refresh: 2nd of the month, 03:00 JST.
+			// src/index.ts branches on controller.cron, so the two never mix.
+			"0 18 1 * *"
 		]
 	},
 	"d1_databases": [

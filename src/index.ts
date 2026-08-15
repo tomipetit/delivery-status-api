@@ -1,3 +1,4 @@
+import { refreshPostalCodes } from "./postal/refresh";
 import { findActiveApiKey, touchApiKeyUsage } from "./storage/api-keys";
 import { listRestrictions } from "./storage/restrictions";
 import { SyncError, syncAll, type SyncEnv } from "./sync";
@@ -69,6 +70,29 @@ function parseCarrier(value: string | null): Carrier | undefined {
   return undefined;
 }
 
+/**
+ * The monthly postal-code refresh trigger, matched against `controller.cron`.
+ * Must stay identical to the second entry of `triggers.crons` in wrangler.jsonc.
+ */
+const POSTAL_REFRESH_CRON = "0 18 1 * *";
+
+/**
+ * Postal codes are an enrichment of data that is already correct without them,
+ * so the monthly refresh is fully guarded: whatever it does, the stored
+ * restrictions and the daily carrier sync are untouched by its failure.
+ */
+async function runPostalRefresh(env: Env): Promise<void> {
+  try {
+    const result = await refreshPostalCodes(env.DB);
+    console.info(
+      `[postal] ${result.yymm}: deleted=${result.deleted} added=${result.added}`
+      + (result.missing.length > 0 ? ` missing=${result.missing.join(",")}` : ""),
+    );
+  } catch (reason) {
+    console.error(`[postal] monthly refresh failed: ${errorMessage(reason)}`);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -115,7 +139,14 @@ export default {
     return json({ error: "Not found" }, 404);
   },
 
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Two triggers, two jobs: the daily carrier sync and the monthly postal
+    // refresh never run in the same invocation, so neither can delay or fail
+    // the other.
+    if (controller.cron === POSTAL_REFRESH_CRON) {
+      ctx.waitUntil(runPostalRefresh(env));
+      return;
+    }
     ctx.waitUntil(syncAll(env));
   },
 };

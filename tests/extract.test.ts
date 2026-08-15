@@ -373,3 +373,24 @@ test("extraction instructs the model to keep a non-municipal area out of city", 
     "the retired invariant must not linger in the prompt",
   );
 });
+
+test("extraction instructs the model to emit one record per town rather than a combined area", async () => {
+  const { body } = await captureExtractionRequest(yamatoSource("石川県 | 輪島市 |"));
+  const instructions = String(body.instructions);
+
+  // The same Sagawa article was returning ten town records on one run and a
+  // single comma-joined record on the next, so the record count moved with the
+  // model rather than with the source.
+  assert.match(instructions, /One record per place/);
+  assert.match(instructions, /becomes three records/);
+  assert.match(
+    instructions,
+    /parenthesised sub-area stays attached/,
+    "宝立町（大町泥木・二艘丹）must stay one record, or a sub-locality becomes a town",
+  );
+  assert.match(
+    instructions,
+    /repeats that row's status, services, and reason/,
+    "a split must not drop the attributes the row carried",
+  );
+});

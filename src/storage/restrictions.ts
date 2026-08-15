@@ -1,4 +1,4 @@
-import type { Carrier, DeliveryRestriction } from "../types/restriction";
+import type { Carrier, DeliveryRestriction, PostalCodeLevel } from "../types/restriction";
 import { upsertCarrierSourceStateStatement } from "./source-states";
 import {
   replaceCarrierSourceArticleStatements,
@@ -16,8 +16,9 @@ function replacementStatements(
       db.prepare(`
         INSERT INTO delivery_restrictions (
           carrier, prefecture, city, area, status, services_json, reason,
+          postal_codes_json, postal_code_level,
           source_url, source_published_at, checked_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       `).bind(
         item.carrier,
         item.prefecture,
@@ -26,6 +27,8 @@ function replacementStatements(
         item.status,
         JSON.stringify(item.services),
         item.reason,
+        JSON.stringify(item.postalCodes ?? []),
+        item.postalCodeLevel ?? null,
         item.sourceUrl,
         item.sourcePublishedAt,
         item.checkedAt,
@@ -79,6 +82,21 @@ export async function countCarrierRestrictions(db: D1Database, carrier: Carrier)
   return Number(row?.count ?? 0);
 }
 
+function parsePostalCodes(value: unknown): string[] {
+  if (value === null || value === undefined) return [];
+  try {
+    const parsed = JSON.parse(String(value));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(String).filter((code) => code.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function parsePostalCodeLevel(value: unknown): PostalCodeLevel | null {
+  return value === "town" || value === "city" || value === "prefecture" ? value : null;
+}
+
 export async function listRestrictions(
   db: D1Database,
   carrier?: Carrier,
@@ -97,6 +115,11 @@ export async function listRestrictions(
     status: row.status === "partially_suspended" ? "partially_suspended" : "suspended",
     services: JSON.parse(String(row.services_json ?? "[]")) as string[],
     reason: row.reason ? String(row.reason) : null,
+    // Rows written before the postal columns existed read back as NULL, and a
+    // row whose lookup found nothing carries an empty list: both are reported
+    // as "no codes" rather than as a failure.
+    postalCodes: parsePostalCodes(row.postal_codes_json),
+    postalCodeLevel: parsePostalCodeLevel(row.postal_code_level),
     sourceUrl: String(row.source_url),
     sourcePublishedAt: row.source_published_at ? String(row.source_published_at) : null,
     checkedAt: String(row.checked_at),
