@@ -1,5 +1,5 @@
 import { listRestrictions } from "./storage/restrictions";
-import { syncAll, type SyncEnv } from "./sync";
+import { SyncError, syncAll, type SyncEnv } from "./sync";
 import type { Carrier } from "./types/restriction";
 
 interface Env extends SyncEnv {
@@ -48,8 +48,15 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/api/v1/sync") {
-      const counts = await syncAll(env);
-      return json({ ok: true, counts });
+      try {
+        const counts = await syncAll(env);
+        return json({ ok: true, counts });
+      } catch (error) {
+        if (error instanceof SyncError) {
+          return json({ ok: false, counts: error.counts, failures: error.failures }, 502);
+        }
+        throw error;
+      }
     }
 
     return json({ error: "Not found" }, 404);

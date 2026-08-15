@@ -1,38 +1,7 @@
 import type { SourceDocument } from "../types/restriction";
+import { htmlToStructuredText } from "./html";
 
 const YAMATO_STATUS_URL = "https://www.kuronekoyamato.co.jp/ytc/chien/chien_hp.html";
-
-function decodeHtmlEntities(value: string): string {
-  return value
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) => String.fromCodePoint(parseInt(code, 16)));
-}
-
-function htmlToStructuredText(html: string): string {
-  const text = html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<!--([\s\S]*?)-->/g, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(?:h1|h2|h3|h4|p|div|section|article|ul|ol)>/gi, "\n")
-    .replace(/<\/(?:td|th)>/gi, " | ")
-    .replace(/<\/tr>/gi, "\n")
-    .replace(/<[^>]+>/g, "");
-
-  return decodeHtmlEntities(text)
-    .replace(/[\t\r]+/g, " ")
-    .replace(/ *\| */g, " | ")
-    .replace(/[ ]{2,}/g, " ")
-    .replace(/\n[ ]+/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
 
 function looksLikeJapaneseYamatoPage(text: string): boolean {
   return ["お荷物", "荷受け", "集荷", "配達", "ヤマト"].some((keyword) => text.includes(keyword));
@@ -52,26 +21,8 @@ function decodePageBody(buffer: ArrayBuffer): string {
   return utf8;
 }
 
-function isSuspensionRow(line: string): boolean {
-  if (!line.includes("|")) return false;
-
-  return [
-    "お預かりを停止",
-    "荷受けを停止",
-    "集荷・配達業務を停止",
-    "集荷・配達を停止",
-    "集荷・配達について停止",
-  ].some((phrase) => line.includes(phrase));
-}
-
-function extractSuspensionRows(text: string): string {
-  const rows = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter(isSuspensionRow);
-
-  if (rows.length === 0) {
+export function extractYamatoStatusText(text: string): string {
+  if (!/停止|荷受け/.test(text)) {
     const diagnostic = text
       .split("\n")
       .filter((line) => /停止|荷受け|集荷|配達/.test(line))
@@ -79,16 +30,165 @@ function extractSuspensionRows(text: string): string {
       .join("\n");
 
     throw new Error(
-      `Yamato suspension rows were not found. Diagnostic excerpt: ${diagnostic.slice(0, 1200)}`,
+      `Yamato status context was not found. Diagnostic excerpt: ${diagnostic.slice(0, 1200)}`,
     );
   }
 
+  const lines = text.split("\n");
+  const suspensionSections: string[][] = [];
+  let currentSection: string[] | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const isMarkedHeading = /^[●■◆◇]/.test(trimmed);
+    const isSuspensionHeading = isMarkedHeading && (
+      /荷受け.{0,40}停止/.test(trimmed)
+      || /集荷\s*[・･／/]\s*配達.{0,30}停止中/.test(trimmed)
+    );
+
+    if (isMarkedHeading) {
+      if (isSuspensionHeading) {
+        currentSection = [line];
+        suspensionSections.push(currentSection);
+      } else {
+        currentSection = null;
+      }
+      continue;
+    }
+
+    if (currentSection !== null) currentSection.push(line);
+  }
+
+  if (suspensionSections.length === 0) {
+    const diagnostic = lines
+      .filter((line) => /停止|荷受け|集荷|配達|遅れ/.test(line))
+      .slice(0, 12)
+      .join("\n");
+
+    throw new Error(
+      `Yamato marked suspension sections were not found. Diagnostic excerpt: ${diagnostic.slice(0, 1200)}`,
+    );
+  }
+
+  // Yamato writes remarks with decorative brackets and varying particles, so
+  // compare against a form without them: 『集荷』・『配達』は行っており and
+  // 集荷・配達を行って must both be recognized as the same statement.
+  const normalizeRemarks = (row: string): string => row
+    .replace(/[『』「」【】《》（）()"'“”‘’]/g, "")
+    .replace(/[ \t　]/g, "");
+
+  const statesSuspension = (row: string): boolean => (
+    /(?:荷受け|お預かり|お引き取り|集荷|配達|引受け?)[^。\n]{0,20}(?:停止|休止|中止)/.test(row)
+  );
+
+  const isOperatingRow = (row: string): boolean => {
+    const remarks = normalizeRemarks(row);
+    // A row that states its own suspension stays even when it also mentions a
+    // shortened acceptance window.
+    if (statesSuspension(remarks)) return false;
+
+    return (
+      /集荷[・･／/]配達(?:[をはも])?[^。\n]{0,8}(?:行って|実施|継続)/.test(remarks)
+      || /受付[^。\n]{0,8}(?:締切|締め切り|時間)[^。\n]{0,8}(?:変更|短縮)/.test(remarks)
+    );
+  };
+
+  // A section runs until the next marked heading, so page-wide notices, the
+  // preamble of the following section, and the page footer trail after the
+  // table. Everything after the final table row is dropped.
+  const trimAfterLastTableRow = (section: string[]): string[] => {
+    for (let index = section.length - 1; index > 0; index -= 1) {
+      if (section[index].includes("|")) return section.slice(0, index + 1);
+    }
+
+    return section;
+  };
+
+  const endsWithCellDelimiter = (line: string): boolean => line.trimEnd().endsWith("|");
+
+  // A whole <tr> rendered on one physical line carries every cell delimiter it
+  // needs, so it can be evaluated on its own.
+  const isCompleteSingleLineRow = (line: string): boolean => (
+    endsWithCellDelimiter(line) && (line.match(/\|/g)?.length ?? 0) >= 2
+  );
+
+  const filterOperatingTableRows = (section: string[]): string[] => {
+    const result = [section[0]];
+    let logicalRow: string[] = [];
+    let lastContentLine = "";
+
+    const flushLogicalRow = (): void => {
+      if (logicalRow.length === 0) return;
+      if (!isOperatingRow(logicalRow.join("\n"))) result.push(...logicalRow);
+      logicalRow = [];
+      lastContentLine = "";
+    };
+
+    for (const line of section.slice(1)) {
+      if (line.trim().length === 0) {
+        // Yamato puts one cell per line, so </tr> shows up as a blank line
+        // after a cell delimiter. A <br><br> inside a cell also produces a
+        // blank line, but it follows prose rather than a delimiter.
+        if (logicalRow.length > 0 && !endsWithCellDelimiter(lastContentLine)) {
+          logicalRow.push(line);
+          continue;
+        }
+
+        flushLogicalRow();
+        result.push(line);
+        continue;
+      }
+
+      logicalRow.push(line);
+      lastContentLine = line;
+      if (isCompleteSingleLineRow(line)) flushLogicalRow();
+    }
+    flushLogicalRow();
+    return result;
+  };
+
+  // Yamato currently groups the page into marked sections. Keeping complete
+  // suspension sections preserves table headers, continuation rows, service
+  // columns, and remarks while excluding neighboring delay-only sections.
+  const suspensionText = suspensionSections
+    .map((section) => filterOperatingTableRows(trimAfterLastTableRow(section))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim())
+    .filter(Boolean)
+    .join("\n\n");
+
   return [
-    "The following rows are taken from Yamato Transport's current official status page.",
-    "Only rows that explicitly state shipment acceptance or pickup/delivery suspension are included.",
-    "Columns are separated by |. Preserve the geographical hierarchy written in each row.",
-    ...rows,
+    "The following text contains only Yamato Transport sections explicitly headed as acceptance suspension or pickup/delivery suspension.",
+    "It includes table headings and adjacent rows so geographical values omitted by rowspan-like formatting retain their context.",
+    "Complete suspension-section tables are retained so service limitations and suspension remarks remain available.",
+    "A row inside a suspension section is not necessarily suspended: exclude it when its own remarks say pickup/delivery is operating or otherwise continuing.",
+    "An acceptance suspension limited to a named service, including airport TA-Q-BIN, is an active restriction and must be included with that service name.",
+    "Columns are separated by |. A blank cell may inherit its prefecture or municipality from a preceding row.",
+    suspensionText,
   ].join("\n");
+}
+
+// A line that is nothing but Yamato's "as of" stamp, e.g. 2026年08月15日　14時現在.
+// The separator is the full-width space U+3000 the page actually uses (covered
+// by \s), and the numbers are not always zero padded (2026年8月5日 9時現在).
+// Anchored to the whole line so a timestamp inside a table row — which always
+// carries a "|" cell delimiter — is never stripped: that one would be real
+// content moving.
+const YAMATO_AS_OF_LINE = /^\s*\d{4}年\s*\d{1,2}月\s*\d{1,2}日\s*\d{1,2}時現在\s*$/;
+
+/**
+ * The hash input for change detection, which deliberately differs from the text
+ * sent to the model. Yamato restamps its "…時現在" line every hour even when the
+ * table below it is untouched, so hashing the raw text makes every run look
+ * changed and re-triggers a paid extraction daily. The model still receives the
+ * timestamp (it needs it to judge currency); only the fingerprint drops it.
+ */
+export function yamatoFingerprintText(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !YAMATO_AS_OF_LINE.test(line))
+    .join("\n");
 }
 
 export async function fetchYamatoStatus(): Promise<SourceDocument> {
@@ -105,6 +205,6 @@ export async function fetchYamatoStatus(): Promise<SourceDocument> {
   return {
     carrier: "yamato",
     url: YAMATO_STATUS_URL,
-    text: extractSuspensionRows(structuredText),
+    text: extractYamatoStatusText(structuredText),
   };
 }

@@ -7,9 +7,28 @@
 - Cloudflare Workers
 - Cron Triggers
 - D1
-- Browser Rendering（佐川急便向け）
-- OpenAI API / Terra
+- OpenAI Responses API（AI抽出・Web検索）
 - TypeScript
+
+## Architecture
+
+配送会社ごとに公式情報の取得方法を分けています。
+
+- ヤマト運輸: 公式の配送状況ページをWorkersから直接取得し、停止セクションの内容が前回から変わった場合だけAIで正規化
+- 佐川急便: 公式サイトが配信している重要なお知らせのXML（`sagawa_xml/importance/importance_list.xml`と記事ごとの`importance_detail_<番号>.xml`）をWorkersから直接取得。掲載中の全記事が対象になるため、新しい`information/detail/<番号>/`にも自動で追従し、新規・更新記事の本文だけをAIで正規化
+- 日本郵便: 公式`unkou.pdf`を直接取得してSHA-256を比較し、PDFが変わった場合だけ公式ドメイン限定の`web_search`で抽出
+
+取得元のSHA-256または現行記事集合の安定した指紋、参照URL、最終確認日時・最終変更日時をD1の`carrier_source_states`へ保存します。佐川急便はさらに`carrier_source_articles`へ記事ごとの指紋と正規化結果を保存します。佐川急便の記事指紋は公式XMLのURL・タイトル・公開日から作るため、内容が変わらない限り実行ごとに変化しません。同じ日本時間の日に手動同期を繰り返した場合は外部取得自体を省略します。別の日でもヤマト運輸の停止セクションまたは日本郵便のPDFが同一ならAI抽出を省略します。佐川急便の記事集合が変化しても、指紋が変わらない現行記事は保存済み結果を再利用し、新規・更新記事だけをAI抽出します。掲載から消えた記事の結果は統合対象から除外します。保存・公開する佐川急便の出典URLは利用者が閲覧できる一覧ページと記事ページで、XMLエンドポイントは内部実装として保存しません。Cloudflare Browser Renderingのbindingは使用しません。
+
+日本郵便の検索結果は次のいずれかとして判定されます。
+
+- `active_restrictions_found`: 公式根拠から現在有効な停止地域を確認し、取得結果でD1を更新
+- `no_active_restrictions`: 公式根拠から現在有効な停止地域がないことを確認し、該当会社の既存データを空に更新
+- `insufficient_evidence`: 公式根拠だけでは判断できないため同期失敗とし、該当会社の既存データを保持
+
+拒否、HTTP/APIエラー、不完全・不正な応答、公式検索結果と出典URLの不一致も同期失敗として扱い、既存データを保持します。
+
+佐川急便はWeb検索を使わず、公式XMLの取得・解析・AI抽出のいずれかが失敗した場合は同期失敗として既存データを保持します。公式一覧XMLから記事を1件も解析できなかった場合も、レイアウト変更を「掲載なし」と誤認して既存データを消さないよう失敗として扱います。一方で、解析できた全記事を読んだ結果として停止情報が0件だった場合は確定的な結果としてそのまま保存します。日本郵便は引き続き公式ドメイン限定検索です。
 
 ## Endpoints
 
@@ -41,7 +60,22 @@ POST /api/v1/sync
 Authorization: Bearer <API_KEY>
 ```
 
-通常はCron Triggerから自動実行します。
+通常はCron Triggerから1日1回自動実行します。手動同期にも同じ差分キャッシュが適用されます。
+
+成功時は会社ごとの保存件数を返します。
+
+```json
+{
+  "ok": true,
+  "counts": {
+    "yamato": 4,
+    "sagawa": 2,
+    "japan_post": 0
+  }
+}
+```
+
+一部の会社で同期に失敗した場合はHTTP 502と`failures`を返します。成功した会社の更新は保存され、失敗した会社の既存データは保持されます。
 
 ## Setup
 
@@ -52,7 +86,7 @@ npm install
 D1データベースを作成します。
 
 ```bash
-npx wrangler d1 create delivery-status-db
+npx wrangler d1 create delivery-status
 ```
 
 返された `database_id` を `wrangler.jsonc` の `REPLACE_WITH_D1_DATABASE_ID` に設定してください。
@@ -77,7 +111,7 @@ OPENAI_API_KEY=sk-...
 API_KEY=change-me
 ```
 
-`wrangler.jsonc` の `OPENAI_MODEL` には利用するTerraのAPIモデルIDを設定してください。
+`wrangler.jsonc`では、ヤマト運輸・佐川急便の取得済み本文を正規化するモデルを`OPENAI_MODEL`、日本郵便の公式情報を`web_search`で調査するモデルを`OPENAI_RESEARCH_MODEL`に設定します。既定値はそれぞれ`gpt-5.6-terra`と`gpt-5.6-sol`です。調査用モデルにはResponses APIの`web_search`とStructured Outputsを利用できるモデルIDを指定してください。
 
 本番環境のsecretはWranglerから登録します。
 
@@ -101,9 +135,21 @@ curl http://localhost:8787/__scheduled
 API確認例:
 
 ```bash
+curl -X POST \
+  -H 'Authorization: Bearer change-me' \
+  http://localhost:8787/api/v1/sync
+
 curl \
   -H 'Authorization: Bearer change-me' \
   http://localhost:8787/api/v1/restrictions
+```
+
+会社別の結果は`carrier`クエリで確認できます。
+
+```bash
+curl \
+  -H 'Authorization: Bearer change-me' \
+  'http://localhost:8787/api/v1/restrictions?carrier=sagawa'
 ```
 
 ## Deploy
@@ -112,10 +158,10 @@ curl \
 npm run deploy
 ```
 
-初期設定では6時間ごとに同期します。
+初期設定では毎日09:00（日本時間）に同期します。
 
 ```text
-0 */6 * * *
+0 0 * * *
 ```
 
 Cloudflare Cron TriggersはUTC基準です。
@@ -127,25 +173,23 @@ src/
 ├── ai/
 │   └── terra.ts
 ├── scrapers/
-│   ├── japan-post.ts
+│   ├── html.ts
 │   ├── sagawa.ts
 │   └── yamato.ts
+├── source-fingerprint.ts
 ├── storage/
-│   └── restrictions.ts
+│   ├── restrictions.ts
+│   ├── source-articles.ts
+│   └── source-states.ts
 ├── types/
 │   └── restriction.ts
 ├── index.ts
 └── sync.ts
 ```
 
-## Notes
+## Known limitations
 
-現在は初期実装です。特に以下は本番投入前に追加・調整する予定です。
-
-- 各社ページから必要部分だけを抽出してAI入力tokenを削減
-- 佐川急便のお知らせ一覧から配送影響記事だけを追跡
-- 前回取得内容のhash比較によるTerra呼び出し抑制
-- OpenAI Structured OutputsによるJSON schema固定
-- D1更新時の差分管理・履歴保存
-- APIのレート制限
-- 取得失敗時のログ・通知
+- 佐川急便は1日1回、公式の重要なお知らせXMLを取得します。Web検索は使わず、新規記事または公式XMLのタイトル・公開日が変わった記事の本文だけをAIで正規化します。日本郵便はPDFが変わった場合だけWeb検索を実行します。モデル利用料とは別に検索ツールの利用料が発生する可能性があります。
+- 日本郵便のWeb検索で参照できるのは検索インデックスに登録され、OpenAIの検索から到達できる公式ページに限られます。佐川急便は公式XMLの構造に依存するため、配信形式が変わった場合は同期失敗として既存データを保持します。
+- ヤマト運輸でAI抽出結果が0件になった場合は、「停止地域なし」を直接証明できないため既存データを保持します。
+- 郵便番号の付与、D1の変更履歴、同期失敗通知、APIのレート制限は未実装です。

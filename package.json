@@ -6,12 +6,14 @@
   "scripts": {
     "dev": "wrangler dev --test-scheduled",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
-    "db:migrate:local": "wrangler d1 migrations apply delivery-status-db --local",
-    "db:migrate:remote": "wrangler d1 migrations apply delivery-status-db --remote"
+    "test": "node scripts/run-tests.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "db:migrate:local": "wrangler d1 migrations apply delivery-status --local",
+    "db:migrate:remote": "wrangler d1 migrations apply delivery-status --remote"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
+    "@types/node": "^26.2.0",
     "typescript": "latest",
     "wrangler": "latest"
   }
