@@ -34,37 +34,61 @@ function htmlToStructuredText(html: string): string {
     .trim();
 }
 
-function extractSection(text: string, start: string, endCandidates: string[]): string | null {
-  const startIndex = text.indexOf(start);
-  if (startIndex === -1) return null;
-
-  const contentStart = startIndex + start.length;
-  const endIndexes = endCandidates
-    .map((candidate) => text.indexOf(candidate, contentStart))
-    .filter((index) => index >= 0);
-  const endIndex = endIndexes.length > 0 ? Math.min(...endIndexes) : text.length;
-
-  return `${start}\n${text.slice(contentStart, endIndex).trim()}`;
+function looksLikeJapaneseYamatoPage(text: string): boolean {
+  return ["お荷物", "荷受け", "集荷", "配達", "ヤマト"].some((keyword) => text.includes(keyword));
 }
 
-function extractSuspensionSections(text: string): string {
-  const sections = [
-    extractSection(text, "下記地域のお荷物について、荷受けを停止しております", [
-      "お問い合わせは",
-      "営業所の営業状況について",
-      "集配状況について",
-    ]),
-    extractSection(text, "集荷・配達停止中地域", [
-      "お問い合わせは",
-      "©",
-    ]),
-  ].filter((section): section is string => Boolean(section));
+function decodePageBody(buffer: ArrayBuffer): string {
+  const utf8 = new TextDecoder("utf-8").decode(buffer);
+  if (looksLikeJapaneseYamatoPage(utf8)) return utf8;
 
-  if (sections.length === 0) {
-    throw new Error("Yamato suspension sections were not found");
+  try {
+    const shiftJis = new TextDecoder("shift_jis").decode(buffer);
+    if (looksLikeJapaneseYamatoPage(shiftJis)) return shiftJis;
+  } catch {
+    // Some runtimes only expose UTF-8. In that case keep the UTF-8 result.
   }
 
-  return sections.join("\n\n---\n\n");
+  return utf8;
+}
+
+function isSuspensionRow(line: string): boolean {
+  if (!line.includes("|")) return false;
+
+  return [
+    "お預かりを停止",
+    "荷受けを停止",
+    "集荷・配達業務を停止",
+    "集荷・配達を停止",
+    "集荷・配達について停止",
+  ].some((phrase) => line.includes(phrase));
+}
+
+function extractSuspensionRows(text: string): string {
+  const rows = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter(isSuspensionRow);
+
+  if (rows.length === 0) {
+    const diagnostic = text
+      .split("\n")
+      .filter((line) => /停止|荷受け|集荷|配達/.test(line))
+      .slice(0, 12)
+      .join("\n");
+
+    throw new Error(
+      `Yamato suspension rows were not found. Diagnostic excerpt: ${diagnostic.slice(0, 1200)}`,
+    );
+  }
+
+  return [
+    "The following rows are taken from Yamato Transport's current official status page.",
+    "Only rows that explicitly state shipment acceptance or pickup/delivery suspension are included.",
+    "Columns are separated by |. Preserve the geographical hierarchy written in each row.",
+    ...rows,
+  ].join("\n");
 }
 
 export async function fetchYamatoStatus(): Promise<SourceDocument> {
@@ -74,12 +98,13 @@ export async function fetchYamatoStatus(): Promise<SourceDocument> {
 
   if (!response.ok) throw new Error(`Yamato fetch failed: ${response.status}`);
 
-  const html = await response.text();
+  const buffer = await response.arrayBuffer();
+  const html = decodePageBody(buffer);
   const structuredText = htmlToStructuredText(html);
 
   return {
     carrier: "yamato",
     url: YAMATO_STATUS_URL,
-    text: extractSuspensionSections(structuredText),
+    text: extractSuspensionRows(structuredText),
   };
 }
