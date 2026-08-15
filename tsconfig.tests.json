@@ -1,0 +1,11 @@
+{
+  // The test runner compiles tests/ through esbuild, which strips types without
+  // checking them. This config is what actually type-checks the suite.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node"],
+    // Tests import source modules with an explicit .ts extension.
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

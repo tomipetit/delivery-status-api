@@ -1,11 +1,16 @@
 import type { Carrier, DeliveryRestriction } from "../types/restriction";
+import { upsertCarrierSourceStateStatement } from "./source-states";
+import {
+  replaceCarrierSourceArticleStatements,
+  type CarrierSourceArticle,
+} from "./source-articles";
 
-export async function replaceCarrierRestrictions(
+function replacementStatements(
   db: D1Database,
   carrier: Carrier,
   restrictions: DeliveryRestriction[],
-): Promise<void> {
-  const statements = [
+): D1PreparedStatement[] {
+  return [
     db.prepare("DELETE FROM delivery_restrictions WHERE carrier = ?").bind(carrier),
     ...restrictions.map((item) =>
       db.prepare(`
@@ -27,8 +32,51 @@ export async function replaceCarrierRestrictions(
       ),
     ),
   ];
+}
 
-  await db.batch(statements);
+export async function replaceCarrierRestrictions(
+  db: D1Database,
+  carrier: Carrier,
+  restrictions: DeliveryRestriction[],
+): Promise<void> {
+  await db.batch(replacementStatements(db, carrier, restrictions));
+}
+
+export async function replaceCarrierRestrictionsAndState(
+  db: D1Database,
+  carrier: Carrier,
+  restrictions: DeliveryRestriction[],
+  fingerprint: string,
+  sourceUrls: string[],
+  checkedAt: string,
+): Promise<void> {
+  await db.batch([
+    ...replacementStatements(db, carrier, restrictions),
+    upsertCarrierSourceStateStatement(db, carrier, fingerprint, sourceUrls, checkedAt),
+  ]);
+}
+
+export async function replaceCarrierRestrictionsStateAndArticles(
+  db: D1Database,
+  carrier: Carrier,
+  restrictions: DeliveryRestriction[],
+  fingerprint: string,
+  sourceUrls: string[],
+  checkedAt: string,
+  articles: CarrierSourceArticle[],
+): Promise<void> {
+  await db.batch([
+    ...replacementStatements(db, carrier, restrictions),
+    upsertCarrierSourceStateStatement(db, carrier, fingerprint, sourceUrls, checkedAt),
+    ...replaceCarrierSourceArticleStatements(db, carrier, articles),
+  ]);
+}
+
+export async function countCarrierRestrictions(db: D1Database, carrier: Carrier): Promise<number> {
+  const row = await db.prepare(`
+    SELECT COUNT(*) AS count FROM delivery_restrictions WHERE carrier = ?
+  `).bind(carrier).first<{ count: number | string }>();
+  return Number(row?.count ?? 0);
 }
 
 export async function listRestrictions(
