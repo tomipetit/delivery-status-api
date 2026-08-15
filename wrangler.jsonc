@@ -1,26 +1,31 @@
 {
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "delivery-status-api",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-03-24",
-  "compatibility_flags": ["nodejs_compat"],
-  "observability": {
-    "enabled": true
-  },
-  "triggers": {
-    "crons": ["0 */6 * * *"]
-  },
-  "browser": {
-    "binding": "BROWSER"
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "delivery-status-db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
-    }
-  ],
-  "vars": {
-    "OPENAI_MODEL": "REPLACE_WITH_TERRA_MODEL_ID"
-  }
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "delivery-status-api",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-03-24",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true
+	},
+	"triggers": {
+		"crons": [
+			"0 */6 * * *"
+		]
+	},
+	"browser": {
+		"binding": "BROWSER",
+		"remote": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "delivery-status-db",
+			"database_id": "REPLACE_WITH_D1_DATABAS1b01bb10-30b7-45a0-92f8-4f5c4c8b9148E_ID"
+		}
+	],
+	"vars": {
+		"OPENAI_MODEL": "gpt-5.6-terra"
+	}
 }
