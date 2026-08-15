@@ -45,9 +45,20 @@ export interface StoredRestrictionRow {
   status: string;
   services_json: string;
   reason: string | null;
+  // Written by migration 0004. Rows stored before it read back as NULL, which
+  // is why both columns are optional here.
+  postal_codes_json?: string | null;
+  postal_code_level?: string | null;
   source_url: string;
   source_published_at: string | null;
   checked_at: string;
+}
+
+export interface StoredPostalCodeRow {
+  postal_code: string;
+  prefecture: string;
+  city: string;
+  town: string;
 }
 
 export function createInMemoryD1(options: {
@@ -56,6 +67,7 @@ export function createInMemoryD1(options: {
   articles?: StoredSourceArticle[];
   apiKeys?: StoredApiKey[];
   restrictions?: StoredRestrictionRow[];
+  postalCodes?: StoredPostalCodeRow[];
 } = {}) {
   const counts: Record<Carrier, number> = {
     yamato: options.counts?.yamato ?? 0,
@@ -73,10 +85,12 @@ export function createInMemoryD1(options: {
     (options.apiKeys ?? []).map((apiKey) => [apiKey.id, { ...apiKey }]),
   );
   const restrictionRows = (options.restrictions ?? []).map((row) => ({ ...row }));
+  const postalCodeRows = (options.postalCodes ?? []).map((row) => ({ ...row }));
   const batches: PreparedStatement[][] = [];
   const runs: PreparedStatement[] = [];
   let failNextBatch: Error | null = null;
   let failNextApiKeyLookup: Error | null = null;
+  let failPostalCodeLookups: Error | null = null;
   let apiKeyUsageWrites = 0;
 
   const executeStateUpsert = (statement: PreparedStatement): void => {
@@ -127,6 +141,15 @@ export function createInMemoryD1(options: {
         throw new Error(`Unsupported first SQL: ${statement.sql}`);
       },
       async all<T>() {
+        if (/FROM\s+postal_codes/i.test(statement.sql)) {
+          if (failPostalCodeLookups !== null) throw failPostalCodeLookups;
+          const [prefecture, city] = statement.values.map(String);
+          return {
+            results: postalCodeRows.filter(
+              (row) => row.prefecture === prefecture && row.city === city,
+            ) as T[],
+          };
+        }
         if (/FROM\s+delivery_restrictions/i.test(statement.sql)) {
           const carrier = statement.values[0] as Carrier | undefined;
           return {
@@ -196,6 +219,26 @@ export function createInMemoryD1(options: {
         }
       }
       for (const statement of statements) {
+        // Mirrors the monthly refresh: deletions match the full row tuple, and
+        // an insertion is preceded by the deletion of the same tuple.
+        if (/DELETE\s+FROM\s+postal_codes/i.test(statement.sql)) {
+          const [postalCode, prefecture, city, town] = statement.values.map(String);
+          for (let index = postalCodeRows.length - 1; index >= 0; index -= 1) {
+            const row = postalCodeRows[index];
+            if (
+              row.postal_code === postalCode && row.prefecture === prefecture
+              && row.city === city && row.town === town
+            ) {
+              postalCodeRows.splice(index, 1);
+            }
+          }
+        }
+        if (/INSERT\s+INTO\s+postal_codes/i.test(statement.sql)) {
+          const [postal_code, prefecture, city, town] = statement.values.map(String);
+          postalCodeRows.push({ postal_code, prefecture, city, town });
+        }
+      }
+      for (const statement of statements) {
         if (/DELETE\s+FROM\s+carrier_source_articles/i.test(statement.sql)) {
           const carrier = statement.values[0] as Carrier;
           for (const [key, article] of articles) {
@@ -228,11 +271,16 @@ export function createInMemoryD1(options: {
     states,
     articles,
     apiKeys,
+    postalCodeRows,
     batches,
     runs,
     apiKeyUsageWrites: () => apiKeyUsageWrites,
     failOnce(error = new Error("simulated atomic batch failure")) {
       failNextBatch = error;
+    },
+    /** Every postal-code lookup fails from here on, as a broken table would. */
+    failPostalLookups(error = new Error("simulated postal_codes failure")) {
+      failPostalCodeLookups = error;
     },
     failApiKeyLookupOnce(error = new Error("simulated D1 lookup failure")) {
       failNextApiKeyLookup = error;

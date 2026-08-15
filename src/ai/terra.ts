@@ -123,6 +123,12 @@ function normalizeRestriction(
       ? [...new Set(item.services.map(String).map((value) => value.trim()).filter(Boolean))]
       : [],
     reason: cleanNullableString(item.reason),
+    // Postal codes are never taken from the model, which is why they are empty
+    // here: they are deterministic data, and a model asked for one produces
+    // plausible, non-existent numbers. src/postal fills these in from the
+    // official dataset after extraction and before storage.
+    postalCodes: [],
+    postalCodeLevel: null,
     // Always the URL we fetched ourselves, never a URL the model produced.
     sourceUrl: source.url,
     sourcePublishedAt: source.publishedAt ?? null,

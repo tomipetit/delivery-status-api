@@ -11,6 +11,7 @@
     "key:issue": "node scripts/api-key.mjs issue",
     "key:list": "node scripts/api-key.mjs list",
     "key:revoke": "node scripts/api-key.mjs revoke",
+    "postal:import": "node scripts/postal-codes.mjs import",
     "db:migrate:local": "wrangler d1 migrations apply delivery-status --local",
     "db:migrate:remote": "wrangler d1 migrations apply delivery-status --remote"
   },
