@@ -41,6 +41,20 @@ export interface JapanPostExtractionResult {
 // partial restriction list, so raising this is safe and lowering it is not.
 const EXTRACTION_MAX_OUTPUT_TOKENS = 8000;
 
+/**
+ * Identifies the extraction rules, not the source and not the model.
+ *
+ * Every carrier's stored fingerprint embeds this, so a source whose bytes have
+ * not changed is still re-extracted once after the rules change. Without it a
+ * corrected rule reaches production only when the carrier happens to edit its
+ * page — the fix ships but the stored data keeps the old shape indefinitely.
+ *
+ * Bump it whenever RESTRICTION_RULES, the output contract, or the
+ * normalisation in normalizeRestriction changes what a correct extraction of
+ * unchanged source text would produce.
+ */
+export const EXTRACTOR_VERSION = "2026-08-15-destination-area";
+
 // Runaway guard only: real carrier sources are a few kilobytes. Hitting this is
 // a signal that the source shape changed, so it is logged rather than silent.
 const EXTRACTION_INPUT_CHARACTER_LIMIT = 30000;

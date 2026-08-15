@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { EXTRACTOR_VERSION } from "../src/ai/terra.ts";
+
 import worker from "../src/index.ts";
 import { sha256Hex } from "../src/source-fingerprint.ts";
 import { tokyoCalendarDayStartIso } from "../src/tokyo-day.ts";
@@ -38,9 +40,9 @@ const restrictionRow: StoredRestrictionRow = {
 function skipStates() {
   const checkedAt = new Date().toISOString();
   return {
-    yamato: sourceState("yamato", `yamato:v3:model=${model}:skip`, checkedAt),
-    sagawa: sourceState("sagawa", `sagawa:xml-v1:model=${model}:skip`, checkedAt),
-    japan_post: sourceState("japan_post", `japan-post:pdf-v1:model=${model}:pdfsha=skip`, checkedAt),
+    yamato: sourceState("yamato", `yamato:v3:rules=${EXTRACTOR_VERSION}:model=${model}:skip`, checkedAt),
+    sagawa: sourceState("sagawa", `sagawa:xml-v1:rules=${EXTRACTOR_VERSION}:model=${model}:skip`, checkedAt),
+    japan_post: sourceState("japan_post", `japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=${model}:pdfsha=skip`, checkedAt),
   };
 }
 

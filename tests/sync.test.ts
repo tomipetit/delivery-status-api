@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { EXTRACTOR_VERSION } from "../src/ai/terra.ts";
+
 import { htmlToStructuredText } from "../src/scrapers/html.ts";
 import { extractYamatoStatusText, yamatoFingerprintText } from "../src/scrapers/yamato.ts";
 import { sha256Hex } from "../src/source-fingerprint.ts";
@@ -39,9 +41,9 @@ function env(db: D1Database): SyncEnv {
 function currentSkipStates(overrides: Record<string, ReturnType<typeof sourceState>> = {}) {
   const checkedAt = todayIso();
   return {
-    yamato: sourceState("yamato", `yamato:v3:model=${model}:skip`, checkedAt),
-    sagawa: sourceState("sagawa", `sagawa:xml-v1:model=${model}:skip`, checkedAt),
-    japan_post: sourceState("japan_post", `japan-post:pdf-v1:model=${model}:pdfsha=skip`, checkedAt),
+    yamato: sourceState("yamato", `yamato:v3:rules=${EXTRACTOR_VERSION}:model=${model}:skip`, checkedAt),
+    sagawa: sourceState("sagawa", `sagawa:xml-v1:rules=${EXTRACTOR_VERSION}:model=${model}:skip`, checkedAt),
+    japan_post: sourceState("japan_post", `japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=${model}:pdfsha=skip`, checkedAt),
     ...overrides,
   };
 }
@@ -143,7 +145,7 @@ async function quietSync<T>(run: () => Promise<T>): Promise<T> {
 test("Yamato same fingerprint avoids OpenAI and replacement, reuses count, and updates checked time", async () => {
   const html = yamatoPage();
   const extracted = extractYamatoStatusText(htmlToStructuredText(html));
-  const fingerprint = `yamato:v3:model=${model}:${await sha256Hex(yamatoFingerprintText(extracted))}`;
+  const fingerprint = `yamato:v3:rules=${EXTRACTOR_VERSION}:model=${model}:${await sha256Hex(yamatoFingerprintText(extracted))}`;
   const previousCheckedAt = yesterdayIso();
   const memory = createInMemoryD1({
     counts: { yamato: 7, sagawa: 2, japan_post: 3 },
@@ -187,7 +189,7 @@ test("Yamato hourly restamp with an unchanged table still avoids the paid extrac
   const servedText = extractYamatoStatusText(htmlToStructuredText(servedHtml));
   assert.notEqual(storedText, servedText, "the served page must really differ from the stored one");
 
-  const fingerprint = `yamato:v3:model=${model}:${await sha256Hex(yamatoFingerprintText(storedText))}`;
+  const fingerprint = `yamato:v3:rules=${EXTRACTOR_VERSION}:model=${model}:${await sha256Hex(yamatoFingerprintText(storedText))}`;
   const previousCheckedAt = yesterdayIso();
   const memory = createInMemoryD1({
     counts: { yamato: 7, sagawa: 2, japan_post: 3 },
@@ -215,7 +217,7 @@ test("Yamato hourly restamp with an unchanged table still avoids the paid extrac
 
 test("Japan Post unchanged PDF hash avoids OpenAI and replacement, reuses count, and updates checked time", async () => {
   const pdf = new TextEncoder().encode("stable japan post PDF");
-  const fingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=japan-post-pdf:v1:${await sha256Hex(pdf.buffer)}`;
+  const fingerprint = `japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=${model}:pdfsha=japan-post-pdf:v1:${await sha256Hex(pdf.buffer)}`;
   const previousCheckedAt = yesterdayIso();
   const memory = createInMemoryD1({
     counts: { yamato: 1, sagawa: 2, japan_post: 21 },
@@ -257,7 +259,7 @@ test("Sagawa always fetches the official article list but skips extraction for a
   const memory = createInMemoryD1({
     counts: { yamato: 1, sagawa: 2, japan_post: 3 },
     states: currentSkipStates({
-      sagawa: sourceState("sagawa", `sagawa:xml-v1:model=${model}:old`, previousCheckedAt, [sagawaArticle321]),
+      sagawa: sourceState("sagawa", `sagawa:xml-v1:rules=${EXTRACTOR_VERSION}:model=${model}:old`, previousCheckedAt, [sagawaArticle321]),
     }),
     articles: [{
       carrier: "sagawa",
@@ -270,7 +272,7 @@ test("Sagawa always fetches the official article list but skips extraction for a
         status: "suspended", services: ["飛脚宅配便"], reason: "大雨",
         sourceUrl: sagawaArticle321, sourcePublishedAt: "2026-08-15", checkedAt: previousCheckedAt,
       }]),
-      extractor_version: `sagawa-xml-v1:model=${model}`,
+      extractor_version: `sagawa-xml-v1:rules=${EXTRACTOR_VERSION}:model=${model}`,
       last_seen_at: previousCheckedAt,
     }, {
       carrier: "sagawa",
@@ -284,7 +286,7 @@ test("Sagawa always fetches the official article list but skips extraction for a
         sourceUrl: "https://www2.sagawa-exp.co.jp/information/detail/100/",
         sourcePublishedAt: "2026-08-01", checkedAt: previousCheckedAt,
       }]),
-      extractor_version: `sagawa-xml-v1:model=${model}`,
+      extractor_version: `sagawa-xml-v1:rules=${EXTRACTOR_VERSION}:model=${model}`,
       last_seen_at: previousCheckedAt,
     }],
   });
@@ -344,14 +346,14 @@ test("initial Yamato source runs AI and atomically replaces restrictions with so
     assert.equal(extractionCalls, 1);
     assert.equal(memory.batches.length, 1);
     assert.equal(memory.counts.yamato, 1);
-    assert.match(memory.states.get("yamato")?.fingerprint ?? "", /^yamato:v3:model=test-model:/);
+    assert.match(memory.states.get("yamato")?.fingerprint ?? "", new RegExp(`^yamato:v3:rules=${EXTRACTOR_VERSION}:model=test-model:`));
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
 test("changed Japan Post PDF is downloaded once, attached to the model, and atomically replaces restrictions", async () => {
-  const oldFingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=old`;
+  const oldFingerprint = `japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=${model}:pdfsha=old`;
   const pdfBody = "changed PDF";
   const memory = createInMemoryD1({
     counts: { japan_post: 5 },
@@ -387,14 +389,14 @@ test("changed Japan Post PDF is downloaded once, attached to the model, and atom
     assert.equal(extractionCalls, 1);
     assert.equal(memory.batches.length, 1);
     assert.equal(memory.counts.japan_post, 1);
-    assert.match(memory.states.get("japan_post")?.fingerprint ?? "", /^japan-post:pdf-v1:model=test-model:pdfsha=/);
+    assert.match(memory.states.get("japan_post")?.fingerprint ?? "", new RegExp(`^japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=test-model:pdfsha=`));
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
 test("Japan Post no_active_restrictions stores the authoritative empty set", async () => {
-  const oldFingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=old`;
+  const oldFingerprint = `japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=${model}:pdfsha=old`;
   const memory = createInMemoryD1({
     counts: { japan_post: 5 },
     states: currentSkipStates({ japan_post: sourceState("japan_post", oldFingerprint, yesterdayIso()) }),
@@ -425,7 +427,7 @@ test("Japan Post unreadable or self-contradicting output fails the carrier and r
       prefecture: "石川県", city: "輪島市", area: null, status: "suspended", services: [], reason: null,
     }]),
   ]) {
-    const oldFingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=old`;
+    const oldFingerprint = `japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=${model}:pdfsha=old`;
     const memory = createInMemoryD1({
       counts: { japan_post: 9 },
       states: currentSkipStates({ japan_post: sourceState("japan_post", oldFingerprint, yesterdayIso()) }),
@@ -458,7 +460,7 @@ test("Japan Post unreadable or self-contradicting output fails the carrier and r
 test("a newly listed Sagawa article ID is fetched, extracted, and accepted dynamically", async () => {
   const memory = createInMemoryD1({
     counts: { sagawa: 4 },
-    states: currentSkipStates({ sagawa: sourceState("sagawa", `sagawa:xml-v1:model=${model}:old`, yesterdayIso()) }),
+    states: currentSkipStates({ sagawa: sourceState("sagawa", `sagawa:xml-v1:rules=${EXTRACTOR_VERSION}:model=${model}:old`, yesterdayIso()) }),
   });
   let articleFetches = 0;
   let extractionCalls = 0;
@@ -493,7 +495,7 @@ test("a newly listed Sagawa article ID is fetched, extracted, and accepted dynam
 });
 
 test("failed Sagawa article extraction preserves restrictions and fingerprint for retry", async () => {
-  const oldFingerprint = `sagawa:xml-v1:model=${model}:old`;
+  const oldFingerprint = `sagawa:xml-v1:rules=${EXTRACTOR_VERSION}:model=${model}:old`;
   const memory = createInMemoryD1({
     counts: { sagawa: 6 },
     states: currentSkipStates({ sagawa: sourceState("sagawa", oldFingerprint, yesterdayIso()) }),
@@ -523,7 +525,7 @@ test("failed Sagawa article extraction preserves restrictions and fingerprint fo
 });
 
 test("atomic store failure does not advance fingerprint and allows the next run to retry", async () => {
-  const oldFingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=old`;
+  const oldFingerprint = `japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=${model}:pdfsha=old`;
   const memory = createInMemoryD1({
     counts: { japan_post: 8 },
     states: currentSkipStates({ japan_post: sourceState("japan_post", oldFingerprint, yesterdayIso()) }),
@@ -553,4 +555,22 @@ test("atomic store failure does not advance fingerprint and allows the next run 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("every carrier fingerprint carries the extractor rules version", async () => {
+  // A corrected rule must re-extract sources whose bytes never changed. Without
+  // the rules segment the fix ships but the stored data keeps its old shape
+  // until the carrier happens to edit its page.
+  const memory = createInMemoryD1({ states: currentSkipStates() });
+  const stored = ["yamato", "sagawa", "japan_post"] as const;
+
+  for (const carrier of stored) {
+    assert.match(
+      memory.states.get(carrier)?.fingerprint ?? "",
+      new RegExp(`:rules=${EXTRACTOR_VERSION}:`),
+      `${carrier} must scope its fingerprint to the extraction rules, not only the model`,
+    );
+  }
+
+  assert.ok(EXTRACTOR_VERSION.length > 0, "the extractor version must never be empty");
 });

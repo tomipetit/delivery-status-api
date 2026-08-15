@@ -1,5 +1,6 @@
 import {
   deduplicateRestrictions,
+  EXTRACTOR_VERSION,
   extractRestrictions,
   extractRestrictionsFromPdf,
   type JapanPostExtractionResult,
@@ -92,7 +93,7 @@ async function syncYamato(
   const previousState = await getCarrierSourceState(env.DB, "yamato");
   // v3: the fingerprint stopped covering Yamato's hourly "…時現在" stamp, so
   // hashes stored under the v2 scheme must never compare equal to new ones.
-  const versionPrefix = `yamato:v3:model=${env.OPENAI_MODEL}:`;
+  const versionPrefix = `yamato:v3:rules=${EXTRACTOR_VERSION}:model=${env.OPENAI_MODEL}:`;
   if (
     previousState !== null
     && previousState.fingerprint.startsWith(versionPrefix)
@@ -200,7 +201,7 @@ async function syncJapanPost(
   // being looked up with a search tool, and the model that reads it is
   // OPENAI_MODEL rather than the removed research-model variable. Fingerprints
   // stored under the research scheme must never compare equal to new ones.
-  const versionPrefix = `japan-post:pdf-v1:model=${env.OPENAI_MODEL}:pdfsha=`;
+  const versionPrefix = `japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=${env.OPENAI_MODEL}:pdfsha=`;
   if (
     previousState !== null
     && previousState.fingerprint.startsWith(versionPrefix)
@@ -278,8 +279,8 @@ async function syncSagawa(
 ): Promise<void> {
   const now = new Date();
   const previousState = await getCarrierSourceState(env.DB, "sagawa");
-  const extractorVersion = `sagawa-xml-v1:model=${env.OPENAI_MODEL}`;
-  const versionPrefix = `sagawa:xml-v1:model=${env.OPENAI_MODEL}:`;
+  const extractorVersion = `sagawa-xml-v1:rules=${EXTRACTOR_VERSION}:model=${env.OPENAI_MODEL}`;
+  const versionPrefix = `sagawa:xml-v1:rules=${EXTRACTOR_VERSION}:model=${env.OPENAI_MODEL}:`;
   if (
     previousState !== null
     && previousState.fingerprint.startsWith(versionPrefix)
