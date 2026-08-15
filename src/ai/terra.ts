@@ -53,7 +53,7 @@ const EXTRACTION_MAX_OUTPUT_TOKENS = 8000;
  * normalisation in normalizeRestriction changes what a correct extraction of
  * unchanged source text would produce.
  */
-export const EXTRACTOR_VERSION = "2026-08-15-postal-codes";
+export const EXTRACTOR_VERSION = "2026-08-15-one-record-per-town";
 
 // Runaway guard only: real carrier sources are a few kilobytes. Hitting this is
 // a signal that the source shape changed, so it is logged rather than silent.
@@ -274,6 +274,9 @@ const RESTRICTION_RULES = [
   "area must contain place names only. Drop a bracketed count that annotates the list rather than naming a place: 小池町,下山町,門前町滝上（10町） becomes 小池町,下山町,門前町滝上.",
   "city may be null when the restriction covers the entire prefecture, in which case area is null too, or when the source names a non-municipal area, in which case area carries that name.",
   "When one source row contains multiple municipalities, create separate records when their hierarchy can be determined from the source.",
+  "One record per place. When a row lists several towns for the same municipality, emit one record per town rather than one record whose area lists them all: 輪島市 小池町,下山町,赤崎町 becomes three records with area=小池町, area=下山町, area=赤崎町.",
+  "Split on ・ , and 、 only. A parenthesised sub-area stays attached to the town it qualifies: 宝立町（大町泥木・二艘丹）is one record with area=宝立町（大町泥木・二艘丹）, not one record per name inside the brackets.",
+  "Every record produced by a split repeats that row's status, services, and reason unchanged.",
   "Do not turn a delay-only row into a suspension record just because another section on the page contains suspensions.",
   "status must be suspended or partially_suspended.",
   "services must be an array of affected service/product names; use [] only when the source does not specify them.",
