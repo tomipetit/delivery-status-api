@@ -1,8 +1,8 @@
 import {
   deduplicateRestrictions,
   extractRestrictions,
-  researchCarrierRestrictions,
-  type ResearchCarrier,
+  extractRestrictionsFromPdf,
+  type JapanPostExtractionResult,
 } from "./ai/terra";
 import {
   fetchSagawaArticle,
@@ -27,7 +27,6 @@ export interface SyncEnv {
   DB: D1Database;
   OPENAI_API_KEY: string;
   OPENAI_MODEL: string;
-  OPENAI_RESEARCH_MODEL: string;
 }
 
 export interface CarrierSyncFailure {
@@ -183,9 +182,14 @@ async function syncYamato(
 
 const JAPAN_POST_STATUS_URL = "https://www.post.japanpost.jp/assets/docs/service/unkou.pdf";
 
+/**
+ * Downloads the official PDF once. The bytes are both hashed for the change
+ * check and handed to the model, so a changed document is never fetched twice.
+ */
 export async function fetchJapanPostFingerprint(): Promise<{
   fingerprint: string;
   sourceUrl: string;
+  pdf: ArrayBuffer;
 }> {
   const response = await fetch(JAPAN_POST_STATUS_URL, {
     headers: { "user-agent": "delivery-status-api/0.1" },
@@ -195,57 +199,8 @@ export async function fetchJapanPostFingerprint(): Promise<{
   return {
     fingerprint: `japan-post-pdf:v1:${await sha256Hex(bytes)}`,
     sourceUrl: JAPAN_POST_STATUS_URL,
+    pdf: bytes,
   };
-}
-
-async function runCarrierResearch(
-  env: SyncEnv,
-  carrier: ResearchCarrier,
-  counts: Record<Carrier, number>,
-  failures: CarrierSyncFailure[],
-  fingerprint: string,
-  probeSourceUrls: string[],
-  checkedAt: string,
-  restrictionUrls?: readonly string[],
-): Promise<void> {
-  let restrictions: DeliveryRestriction[];
-  let determination: "active_restrictions_found" | "no_active_restrictions";
-  let sourceCount: number;
-  let resultSourceUrls: string[];
-  try {
-    const result = await researchCarrierRestrictions(
-      carrier,
-      env.OPENAI_API_KEY,
-      env.OPENAI_RESEARCH_MODEL,
-      new Date(checkedAt),
-      restrictionUrls,
-    );
-    restrictions = result.restrictions;
-    determination = result.determination;
-    sourceCount = result.sourceUrls.length;
-    resultSourceUrls = result.sourceUrls;
-  } catch (reason) {
-    const failure = { carrier, phase: "research" as const, message: errorMessage(reason) };
-    failures.push(failure);
-    console.error(`[sync] ${carrier} research failed: ${failure.message}`);
-    return;
-  }
-
-  console.info(
-    `[sync] ${carrier}: research determination=${determination} restrictions=${restrictions.length} officialSources=${sourceCount}`,
-  );
-  // A confirmed no-active result deliberately passes an empty array here. The
-  // research validator requires official evidence before this branch can run.
-  await storeCarrierRestrictions(
-    env,
-    carrier,
-    deduplicateRestrictions(restrictions),
-    counts,
-    failures,
-    fingerprint,
-    [...new Set([...probeSourceUrls, ...resultSourceUrls])],
-    checkedAt,
-  );
 }
 
 async function syncJapanPost(
@@ -255,7 +210,11 @@ async function syncJapanPost(
 ): Promise<void> {
   const now = new Date();
   const previousState = await getCarrierSourceState(env.DB, "japan_post");
-  const versionPrefix = `japan-post:research-v2:model=${env.OPENAI_RESEARCH_MODEL}:pdfsha=`;
+  // pdf-v1: the official PDF is now attached to the extraction call instead of
+  // being looked up with a search tool, and the model that reads it is
+  // OPENAI_MODEL rather than the removed research-model variable. Fingerprints
+  // stored under the research scheme must never compare equal to new ones.
+  const versionPrefix = `japan-post:pdf-v1:model=${env.OPENAI_MODEL}:pdfsha=`;
   if (
     previousState !== null
     && previousState.fingerprint.startsWith(versionPrefix)
@@ -281,9 +240,39 @@ async function syncJapanPost(
     console.info(`[sync] japan_post: unchanged; reused=${counts.japan_post}`);
     return;
   }
-  await runCarrierResearch(
+
+  let result: JapanPostExtractionResult;
+  try {
+    result = await extractRestrictionsFromPdf(
+      { carrier: "japan_post", url: probe.sourceUrl },
+      probe.pdf,
+      env.OPENAI_API_KEY,
+      env.OPENAI_MODEL,
+    );
+  } catch (reason) {
+    // Covers an unreadable document and any determination that contradicts the
+    // records returned with it: both throw, so the existing rows are kept.
+    const failure = {
+      carrier: "japan_post" as const,
+      phase: "extract" as const,
+      sourceUrl: probe.sourceUrl,
+      message: errorMessage(reason),
+    };
+    failures.push(failure);
+    console.error(`[sync] japan_post extraction failed (${probe.sourceUrl}): ${failure.message}`);
+    return;
+  }
+
+  console.info(
+    `[sync] japan_post: determination=${result.determination} restrictions=${result.restrictions.length}`,
+  );
+  // A confirmed no_active_restrictions result deliberately stores an empty set:
+  // unlike Yamato's page extraction, the attached PDF is the authoritative full
+  // document and was read end to end, so "none active" is a real determination.
+  await storeCarrierRestrictions(
     env,
     "japan_post",
+    deduplicateRestrictions(result.restrictions),
     counts,
     failures,
     effectiveFingerprint,

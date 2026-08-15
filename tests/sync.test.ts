@@ -18,7 +18,7 @@ function sagawaArticleXmlUrl(id: string): string {
 }
 const japanPostPdfUrl = "https://www.post.japanpost.jp/assets/docs/service/unkou.pdf";
 const model = "test-model";
-const researchModel = "test-research-model";
+const openAiResponsesUrl = "https://api.openai.com/v1/responses";
 
 function todayIso(): string {
   return new Date().toISOString();
@@ -33,7 +33,6 @@ function env(db: D1Database): SyncEnv {
     DB: db,
     OPENAI_API_KEY: "test-key",
     OPENAI_MODEL: model,
-    OPENAI_RESEARCH_MODEL: researchModel,
   };
 }
 
@@ -42,7 +41,7 @@ function currentSkipStates(overrides: Record<string, ReturnType<typeof sourceSta
   return {
     yamato: sourceState("yamato", `yamato:v3:model=${model}:skip`, checkedAt),
     sagawa: sourceState("sagawa", `sagawa:xml-v1:model=${model}:skip`, checkedAt),
-    japan_post: sourceState("japan_post", `japan-post:research-v2:model=${researchModel}:pdfsha=skip`, checkedAt),
+    japan_post: sourceState("japan_post", `japan-post:pdf-v1:model=${model}:pdfsha=skip`, checkedAt),
     ...overrides,
   };
 }
@@ -105,39 +104,25 @@ function sagawaExtractionResponse(): Response {
   });
 }
 
-function researchResponse(
-  sourceUrl: string,
-  determination: "active_restrictions_found" | "no_active_restrictions" | "insufficient_evidence" = "active_restrictions_found",
+function japanPostPdfResponse(
+  determination: "active_restrictions_found" | "no_active_restrictions" | "unreadable" = "active_restrictions_found",
+  restrictions: unknown[] = determination === "active_restrictions_found"
+    ? [{
+      prefecture: "石川県",
+      city: "輪島市",
+      area: null,
+      status: "suspended",
+      services: ["ゆうパック"],
+      reason: "大雨",
+    }]
+    : [],
 ): Response {
   return Response.json({
     status: "completed",
-    output: [
-      {
-        type: "web_search_call",
-        status: "completed",
-        action: { sources: [{ type: "url", url: sourceUrl }] },
-      },
-      {
-        type: "message",
-        content: [{
-          type: "output_text",
-          text: JSON.stringify({
-            determination,
-            restrictions: determination === "active_restrictions_found" ? [{
-              prefecture: "石川県",
-              city: "輪島市",
-              area: null,
-              status: "suspended",
-              services: ["ゆうパック"],
-              reason: "大雨",
-              sourceUrl,
-              sourcePublishedAt: "2026-08-15",
-            }] : [],
-            sourceUrls: [sourceUrl],
-          }),
-        }],
-      },
-    ],
+    output: [{
+      type: "message",
+      content: [{ type: "output_text", text: JSON.stringify({ determination, restrictions }) }],
+    }],
   });
 }
 
@@ -230,7 +215,7 @@ test("Yamato hourly restamp with an unchanged table still avoids the paid extrac
 
 test("Japan Post unchanged PDF hash avoids OpenAI and replacement, reuses count, and updates checked time", async () => {
   const pdf = new TextEncoder().encode("stable japan post PDF");
-  const fingerprint = `japan-post:research-v2:model=${researchModel}:pdfsha=japan-post-pdf:v1:${await sha256Hex(pdf.buffer)}`;
+  const fingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=japan-post-pdf:v1:${await sha256Hex(pdf.buffer)}`;
   const previousCheckedAt = yesterdayIso();
   const memory = createInMemoryD1({
     counts: { yamato: 1, sagawa: 2, japan_post: 21 },
@@ -365,32 +350,108 @@ test("initial Yamato source runs AI and atomically replaces restrictions with so
   }
 });
 
-test("changed Japan Post PDF runs AI and atomically replaces restrictions with new state", async () => {
-  const oldFingerprint = `japan-post:research-v2:model=${researchModel}:pdfsha=old`;
+test("changed Japan Post PDF is downloaded once, attached to the model, and atomically replaces restrictions", async () => {
+  const oldFingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=old`;
+  const pdfBody = "changed PDF";
   const memory = createInMemoryD1({
     counts: { japan_post: 5 },
     states: currentSkipStates({ japan_post: sourceState("japan_post", oldFingerprint, yesterdayIso()) }),
   });
-  let researchCalls = 0;
+  let extractionCalls = 0;
+  let pdfFetches = 0;
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = requestUrl(input);
-    if (url === japanPostPdfUrl) return new Response("changed PDF");
-    if (url === "https://api.openai.com/v1/responses") {
-      researchCalls += 1;
-      return researchResponse(japanPostPdfUrl);
+    if (url === japanPostPdfUrl) {
+      pdfFetches += 1;
+      return new Response(pdfBody);
     }
-    throw new Error(`Unexpected fetch: ${url}`);
+    if (url !== openAiResponsesUrl) throw new Error(`Unexpected fetch: ${url}`);
+    extractionCalls += 1;
+    const body = JSON.parse(String(init?.body)) as Record<string, any>;
+    assert.equal(body.model, model, "the PDF is read by the cheap extraction model");
+    assert.equal(body.tools, undefined, "the attached PDF replaces the search-driven path entirely");
+    const content = body.input[0].content;
+    assert.equal(content[0].type, "input_file");
+    assert.equal(
+      content[0].file_data,
+      `data:application/pdf;base64,${Buffer.from(pdfBody).toString("base64")}`,
+      "the model must receive the same bytes that were hashed",
+    );
+    return japanPostPdfResponse();
   };
 
   try {
     assert.equal((await quietSync(() => syncAll(env(memory.db)))).japan_post, 1);
-    assert.equal(researchCalls, 1);
+    assert.equal(pdfFetches, 1, "the PDF must be downloaded once and reused for both the hash and the model");
+    assert.equal(extractionCalls, 1);
     assert.equal(memory.batches.length, 1);
     assert.equal(memory.counts.japan_post, 1);
+    assert.match(memory.states.get("japan_post")?.fingerprint ?? "", /^japan-post:pdf-v1:model=test-model:pdfsha=/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Japan Post no_active_restrictions stores the authoritative empty set", async () => {
+  const oldFingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=old`;
+  const memory = createInMemoryD1({
+    counts: { japan_post: 5 },
+    states: currentSkipStates({ japan_post: sourceState("japan_post", oldFingerprint, yesterdayIso()) }),
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = requestUrl(input);
+    if (url === japanPostPdfUrl) return new Response("empty PDF");
+    if (url === openAiResponsesUrl) return japanPostPdfResponse("no_active_restrictions");
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  try {
+    assert.equal((await quietSync(() => syncAll(env(memory.db)))).japan_post, 0);
+    assert.equal(memory.batches.length, 1, "the whole document was read, so the empty set is stored");
+    assert.equal(memory.counts.japan_post, 0);
     assert.notEqual(memory.states.get("japan_post")?.fingerprint, oldFingerprint);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("Japan Post unreadable or self-contradicting output fails the carrier and retains its rows", async () => {
+  for (const respond of [
+    () => japanPostPdfResponse("unreadable"),
+    () => japanPostPdfResponse("active_restrictions_found", []),
+    () => japanPostPdfResponse("no_active_restrictions", [{
+      prefecture: "石川県", city: "輪島市", area: null, status: "suspended", services: [], reason: null,
+    }]),
+  ]) {
+    const oldFingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=old`;
+    const memory = createInMemoryD1({
+      counts: { japan_post: 9 },
+      states: currentSkipStates({ japan_post: sourceState("japan_post", oldFingerprint, yesterdayIso()) }),
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = requestUrl(input);
+      if (url === japanPostPdfUrl) return new Response("unreadable PDF");
+      if (url === openAiResponsesUrl) return respond();
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    try {
+      await assert.rejects(quietSync(() => syncAll(env(memory.db))), (error: unknown) => {
+        assert.ok(error instanceof SyncError);
+        assert.equal(error.counts.japan_post, 9);
+        assert.equal(error.failures[0]?.carrier, "japan_post");
+        assert.equal(error.failures[0]?.phase, "extract");
+        return true;
+      });
+      assert.equal(memory.batches.length, 0, "a failed determination must never replace stored rows");
+      assert.equal(memory.counts.japan_post, 9);
+      assert.equal(memory.states.get("japan_post")?.fingerprint, oldFingerprint);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   }
 });
 
@@ -413,7 +474,7 @@ test("a newly listed Sagawa article ID is fetched, extracted, and accepted dynam
     extractionCalls += 1;
     const body = JSON.parse(String(init?.body)) as Record<string, any>;
     assert.equal(body.model, model, "article bodies use the cheap normalization model");
-    assert.equal(body.tools, undefined, "article extraction must not use web_search");
+    assert.equal(body.tools, undefined, "article extraction must not request any tool");
     assert.match(body.input, /information\/detail\/999/);
     return sagawaExtractionResponse();
   };
@@ -462,20 +523,20 @@ test("failed Sagawa article extraction preserves restrictions and fingerprint fo
 });
 
 test("atomic store failure does not advance fingerprint and allows the next run to retry", async () => {
-  const oldFingerprint = `japan-post:research-v2:model=${researchModel}:pdfsha=old`;
+  const oldFingerprint = `japan-post:pdf-v1:model=${model}:pdfsha=old`;
   const memory = createInMemoryD1({
     counts: { japan_post: 8 },
     states: currentSkipStates({ japan_post: sourceState("japan_post", oldFingerprint, yesterdayIso()) }),
   });
   memory.failOnce();
-  let researchCalls = 0;
+  let extractionCalls = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = requestUrl(input);
     if (url === japanPostPdfUrl) return new Response("new PDF");
-    if (url === "https://api.openai.com/v1/responses") {
-      researchCalls += 1;
-      return researchResponse(japanPostPdfUrl);
+    if (url === openAiResponsesUrl) {
+      extractionCalls += 1;
+      return japanPostPdfResponse();
     }
     throw new Error(`Unexpected fetch: ${url}`);
   };
@@ -487,7 +548,7 @@ test("atomic store failure does not advance fingerprint and allows the next run 
 
     const retryCounts = await quietSync(() => syncAll(env(memory.db)));
     assert.equal(retryCounts.japan_post, 1);
-    assert.equal(researchCalls, 2, "failed atomic store must not suppress next-run extraction");
+    assert.equal(extractionCalls, 2, "failed atomic store must not suppress next-run extraction");
     assert.notEqual(memory.states.get("japan_post")?.fingerprint, oldFingerprint);
   } finally {
     globalThis.fetch = originalFetch;
