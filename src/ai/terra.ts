@@ -22,6 +22,29 @@ interface OpenAIResponse {
 /** A source whose bytes are sent to the model instead of scraped text. */
 export type BinarySourceDocument = Omit<SourceDocument, "text">;
 
+/** What one billed call cost, in the shape the usage table stores. */
+export interface TokenUsageRecord {
+  operation: string;
+  model: string;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  /** False when the API answered without a usage block; the call is billed anyway. */
+  usageReported: boolean;
+}
+
+/**
+ * Where a call's cost is reported to, beyond the log line.
+ *
+ * Passed in rather than written from here so this module keeps no storage
+ * dependency and no module-level mutable state: a scheduled sync and a manual
+ * POST /api/v1/sync can run in the same isolate at the same time, and a shared
+ * accumulator would merge their totals.
+ */
+export type TokenUsageSink = (record: TokenUsageRecord) => void;
+
 export type PdfDetermination =
   | "active_restrictions_found"
   | "no_active_restrictions"
@@ -223,21 +246,49 @@ function nestedNumericField(
  * separately from the visible answer, so they are recorded too: without this the
  * only place the spend is visible is the invoice.
  */
-function logTokenUsage(operation: string, model: string, data: OpenAIResponse): void {
+function logTokenUsage(
+  operation: string,
+  model: string,
+  data: OpenAIResponse,
+  sink?: TokenUsageSink,
+): void {
   if (!isRecord(data.usage)) {
     console.info(`[usage] operation=${operation} model=${model} usage=unavailable`);
+    // Still reported: the call was billed, so a day of these must not look idle.
+    sink?.({
+      operation,
+      model,
+      inputTokens: 0,
+      cachedTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 0,
+      usageReported: false,
+    });
     return;
   }
 
+  const record: TokenUsageRecord = {
+    operation,
+    model,
+    inputTokens: numericField(data.usage, "input_tokens") ?? 0,
+    cachedTokens: nestedNumericField(data.usage, "input_tokens_details", "cached_tokens") ?? 0,
+    outputTokens: numericField(data.usage, "output_tokens") ?? 0,
+    reasoningTokens: nestedNumericField(data.usage, "output_tokens_details", "reasoning_tokens") ?? 0,
+    totalTokens: numericField(data.usage, "total_tokens") ?? 0,
+    usageReported: true,
+  };
+
   const fields = [
     `input=${numericField(data.usage, "input_tokens") ?? "?"}`,
-    `cached=${nestedNumericField(data.usage, "input_tokens_details", "cached_tokens") ?? 0}`,
+    `cached=${record.cachedTokens}`,
     `output=${numericField(data.usage, "output_tokens") ?? "?"}`,
-    `reasoning=${nestedNumericField(data.usage, "output_tokens_details", "reasoning_tokens") ?? 0}`,
+    `reasoning=${record.reasoningTokens}`,
     `total=${numericField(data.usage, "total_tokens") ?? "?"}`,
   ];
 
   console.info(`[usage] operation=${operation} model=${model} ${fields.join(" ")}`);
+  sink?.(record);
 }
 
 function incompleteReason(data: OpenAIResponse): string | null {
@@ -306,6 +357,7 @@ async function requestExtraction(
   model: string,
   instructions: string,
   input: unknown,
+  sink?: TokenUsageSink,
 ): Promise<string> {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -326,7 +378,7 @@ async function requestExtraction(
 
   const data = await readJsonResponse(response, operation);
   // Logged before the guards below: a truncated or refused response is billed too.
-  logTokenUsage(usageLabel, model, data);
+  logTokenUsage(usageLabel, model, data, sink);
   // A response cut off by max_output_tokens can still carry parseable JSON for
   // the records it managed to emit, which would look like a shorter but valid
   // restriction list. Fail loudly instead: the sync layer treats this as a
@@ -405,6 +457,7 @@ export async function extractRestrictionsFromPdf(
   pdf: ArrayBuffer | Uint8Array,
   apiKey: string,
   model: string,
+  sink?: TokenUsageSink,
 ): Promise<JapanPostExtractionResult> {
   const operation = "OpenAI PDF extraction";
   const checkedAt = new Date().toISOString();
@@ -431,6 +484,7 @@ export async function extractRestrictionsFromPdf(
         },
       ],
     }],
+    sink,
   );
 
   const parsed = parseOutputJson(raw, operation);
@@ -471,6 +525,7 @@ export async function extractRestrictions(
   source: SourceDocument,
   apiKey: string,
   model: string,
+  sink?: TokenUsageSink,
 ): Promise<DeliveryRestriction[]> {
   const operation = "OpenAI extraction";
   const checkedAt = new Date().toISOString();
@@ -491,6 +546,7 @@ export async function extractRestrictions(
       "Return JSON only: an array of currently active delivery suspension records.",
     ]),
     `SOURCE URL: ${source.url}\nCHECKED AT: ${checkedAt}\n\n${inputText}`,
+    sink,
   );
 
   const parsed = parseOutputJson(raw, operation);

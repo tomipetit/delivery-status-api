@@ -25,7 +25,17 @@
 			"database_id": "1b01bb10-30b7-45a0-92f8-4f5c4c8b9148"
 		}
 	],
+	// The daily token-usage report posts to Google Chat. Its webhook URL carries
+	// credentials in the query string, so it lives in GOOGLE_CHAT_WEBHOOK_URL as
+	// a secret rather than here.
 	"vars": {
-		"OPENAI_MODEL": "gpt-5.6-terra"
+		"OPENAI_MODEL": "gpt-5.6-terra",
+		// USD per 1M tokens, used only to estimate the cost shown in the daily
+		// report. Published gpt-5.6-terra rates as of 2026-08-16; update these
+		// when OpenAI changes them, and the report prints whatever is set here so
+		// a stale value is visible rather than silent.
+		"OPENAI_PRICE_INPUT_USD_PER_MTOK": "2",
+		"OPENAI_PRICE_CACHED_INPUT_USD_PER_MTOK": "0.2",
+		"OPENAI_PRICE_OUTPUT_USD_PER_MTOK": "12"
 	}
 }

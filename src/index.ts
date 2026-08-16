@@ -1,10 +1,12 @@
+import { sendUsageReport, type UsageReportEnv } from "./notify/usage-report";
 import { refreshPostalCodes } from "./postal/refresh";
 import { findActiveApiKey, touchApiKeyUsage } from "./storage/api-keys";
 import { listRestrictions } from "./storage/restrictions";
-import { SyncError, syncAll, type SyncEnv } from "./sync";
+import { SyncError, syncAll, type CarrierSyncFailure, type SyncEnv } from "./sync";
+import { tokyoPreviousCalendarDate } from "./tokyo-day";
 import type { Carrier } from "./types/restriction";
 
-interface Env extends SyncEnv {
+interface Env extends SyncEnv, UsageReportEnv {
   API_KEY: string;
 }
 
@@ -93,6 +95,39 @@ async function runPostalRefresh(env: Env): Promise<void> {
   }
 }
 
+/**
+ * The daily job: sync, then report yesterday's spend.
+ *
+ * The report covers the previous Tokyo day rather than the current one because
+ * that day is closed — a manual POST /api/v1/sync made after this run would
+ * otherwise never appear in any report. It is sent whether or not the sync
+ * succeeded, and a report that stops arriving means the cron itself stopped.
+ */
+async function runDailySync(env: Env): Promise<void> {
+  let failures: readonly CarrierSyncFailure[] = [];
+  let abortMessage: string | null = null;
+
+  try {
+    await syncAll(env);
+  } catch (reason) {
+    if (reason instanceof SyncError) {
+      failures = reason.failures;
+    } else {
+      // Not a per-carrier failure: the run itself did not finish.
+      abortMessage = errorMessage(reason);
+      console.error(`[sync] daily run aborted: ${abortMessage}`);
+    }
+  }
+
+  try {
+    await sendUsageReport(env, tokyoPreviousCalendarDate(new Date()), { failures, abortMessage });
+  } catch (reason) {
+    // Reporting is observation, not the job: a notification failure must not be
+    // able to take down the sync it is reporting on.
+    console.error(`[usage-report] send failed: ${errorMessage(reason)}`);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -147,6 +182,6 @@ export default {
       ctx.waitUntil(runPostalRefresh(env));
       return;
     }
-    ctx.waitUntil(syncAll(env));
+    ctx.waitUntil(runDailySync(env));
   },
 };

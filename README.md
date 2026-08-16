@@ -167,6 +167,7 @@ cp .dev.vars.example .dev.vars
 ```env
 OPENAI_API_KEY=sk-...
 API_KEY=change-me
+GOOGLE_CHAT_WEBHOOK_URL=https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=...
 ```
 
 `wrangler.jsonc`では、ヤマト運輸・佐川急便の取得済み本文の正規化と、日本郵便の公式PDFからの抽出に使うモデルを`OPENAI_MODEL`に設定します。既定値は`gpt-5.6-terra`です。Responses APIで`input_file`によるPDF入力を扱えるモデルIDを指定してください。
@@ -176,7 +177,38 @@ API_KEY=change-me
 ```bash
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put API_KEY
+npx wrangler secret put GOOGLE_CHAT_WEBHOOK_URL
 ```
+
+## トークン使用量の日次レポート
+
+日次同期のあと、前日（JST）のトークン使用量をGoogle Chatに投稿します。使用量は呼び出しごとに`token_usage`テーブルへ記録されるため、Workers Logsの保持期間に依存しません。手動同期（`POST /api/v1/sync`）の分も同じように記録され、翌朝のレポートに含まれます。
+
+対象を「前日」にしているのは、その日が閉じているからです。当日を対象にすると、レポート送信後に走った手動同期の課金がどのレポートにも現れません。
+
+Google Chatの対象スペースで **アプリと統合 → Webhook** から Incoming Webhook を作成し、URLをsecretとして登録します。URLは`key`と`token`をクエリに含む認証情報なので、`wrangler.jsonc`には置きません。
+
+```bash
+npx wrangler secret put GOOGLE_CHAT_WEBHOOK_URL
+```
+
+未設定の場合はレポートを送らずログに警告を出すだけで、同期には影響しません。
+
+### 推定コスト
+
+レポートにはトークン数から算出した推定コストが入ります。単価は`wrangler.jsonc`の`vars`で設定し、レポート本文にも使用した単価が印字されるので、値が古くなった場合に本文から気づけます。
+
+```jsonc
+"OPENAI_PRICE_INPUT_USD_PER_MTOK": "2",
+"OPENAI_PRICE_CACHED_INPUT_USD_PER_MTOK": "0.2",
+"OPENAI_PRICE_OUTPUT_USD_PER_MTOK": "12"
+```
+
+Responses APIの`usage`は入れ子の内訳を親に含めます。`cached_tokens`は`input_tokens`の一部、`reasoning_tokens`は`output_tokens`の一部です。したがって計算は「(input − cached) × input単価 + cached × cached単価 + output × output単価」で、reasoningを別途加算しません（加算すると推論分を二重に計上します）。
+
+長文脈ティア（入力272Kトークン超で単価が変動）は計算に入れていません。抽出の入力は`EXTRACTION_INPUT_CHARACTER_LIMIT`で大きく下回るためです。あくまで推定であり、正確な請求額はOpenAIの明細が正です。
+
+レポートは使用量が0の日も投稿します。全ソースが無変更ならモデルは呼ばれず0トークンになるのが正常で、その場合は「モデル呼び出しはありませんでした」と明記されます。投稿が来ないこと自体がcron停止のシグナルになります。同期が失敗した日は見出しに`⚠️ 同期失敗`が付き、失敗したキャリアと理由が並びます。
 
 ## 郵便番号データの取り込み
 
@@ -297,6 +329,8 @@ Cron Triggerは2本あります。
 src/
 ├── ai/
 │   └── terra.ts
+├── notify/
+│   └── usage-report.ts
 ├── postal/
 │   ├── islands.ts
 │   ├── ken-all.ts
@@ -312,7 +346,8 @@ src/
 │   ├── api-keys.ts
 │   ├── restrictions.ts
 │   ├── source-articles.ts
-│   └── source-states.ts
+│   ├── source-states.ts
+│   └── token-usage.ts
 ├── types/
 │   └── restriction.ts
 ├── index.ts
@@ -327,7 +362,9 @@ scripts/
 
 `src/postal/`は郵便番号の付与だけを担当します。`lookup.ts`が町域・市区町村・島・都道府県の順に解決し、`islands.ts`が島と市町村の対応表、`ken-all.ts`がCSVの解析、`zip.ts`がWorkers側のZIP読み取り、`refresh.ts`が月次差分の適用です。ZIPヘッダーの解析は`scripts/postal-codes.mjs`にも同じ内容があります（Node側は`zlib`、Workers側は`DecompressionStream`を使うため）。
 
-`tokyo-day.ts`は日本時間のカレンダー日判定を提供し、同期の「今日は確認済みか」とAPIキーの`last_used_at`更新の両方で共有します。
+`tokyo-day.ts`は日本時間のカレンダー日判定を提供し、同期の「今日は確認済みか」、APIキーの`last_used_at`更新、使用量レポートの対象日の決定で共有します。
+
+`src/notify/usage-report.ts`は日次レポートの組み立てと投稿だけを担当します。`src/ai/terra.ts`は課金された呼び出しごとに`TokenUsageSink`へ実績を渡し、`syncAll`がそれをまとめて`token_usage`へ書きます。terra側にストレージ依存を持たせないのは、cronと手動同期が同じisolateで同時に走った場合にモジュールレベルの集計だと両者が混ざるためです。
 
 ## Known limitations
 

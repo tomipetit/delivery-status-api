@@ -163,7 +163,7 @@ test("Yamato same fingerprint avoids OpenAI and replacement, reuses count, and u
   try {
     assert.deepEqual(await quietSync(() => syncAll(env(memory.db))), { yamato: 7, sagawa: 2, japan_post: 3 });
     assert.equal(openAiCalls, 0);
-    assert.equal(memory.batches.length, 0);
+    assert.equal(restrictionBatches(memory).length, 0);
     assert.equal(memory.runs.length, 1);
     assert.notEqual(memory.states.get("yamato")?.last_checked_at, previousCheckedAt);
     assert.equal(memory.states.get("yamato")?.fingerprint, fingerprint);
@@ -207,7 +207,7 @@ test("Yamato hourly restamp with an unchanged table still avoids the paid extrac
   try {
     assert.deepEqual(await quietSync(() => syncAll(env(memory.db))), { yamato: 7, sagawa: 2, japan_post: 3 });
     assert.equal(openAiCalls, 0, "only the timestamp moved, so no extraction may be billed");
-    assert.equal(memory.batches.length, 0);
+    assert.equal(restrictionBatches(memory).length, 0);
     assert.equal(memory.states.get("yamato")?.fingerprint, fingerprint);
     assert.notEqual(memory.states.get("yamato")?.last_checked_at, previousCheckedAt);
   } finally {
@@ -240,7 +240,7 @@ test("Japan Post unchanged PDF hash avoids OpenAI and replacement, reuses count,
     assert.deepEqual(await quietSync(() => syncAll(env(memory.db))), { yamato: 1, sagawa: 2, japan_post: 21 });
     assert.equal(pdfFetches, 1, "PDF bytes must be fetched and hashed before deciding it is unchanged");
     assert.equal(openAiCalls, 0);
-    assert.equal(memory.batches.length, 0);
+    assert.equal(restrictionBatches(memory).length, 0);
     assert.equal(memory.runs.length, 1);
     assert.notEqual(memory.states.get("japan_post")?.last_checked_at, previousCheckedAt);
     assert.equal(memory.states.get("japan_post")?.fingerprint, fingerprint);
@@ -313,7 +313,7 @@ test("Sagawa always fetches the official article list but skips extraction for a
     assert.equal(listFetches, 1);
     assert.equal(articleFetches, 0, "an unchanged article must not be fetched again");
     assert.equal(openAiCalls, 0);
-    assert.equal(memory.batches.length, 1);
+    assert.equal(restrictionBatches(memory).length, 1);
     assert.notEqual(memory.states.get("sagawa")?.last_checked_at, previousCheckedAt);
     assert.equal(memory.articles.size, 1, "an article absent from the current list must leave the active cache");
     assert.ok(memory.articles.has(`sagawa|${sagawaArticle321}`));
@@ -344,7 +344,7 @@ test("initial Yamato source runs AI and atomically replaces restrictions with so
   try {
     assert.equal((await quietSync(() => syncAll(env(memory.db)))).yamato, 1);
     assert.equal(extractionCalls, 1);
-    assert.equal(memory.batches.length, 1);
+    assert.equal(restrictionBatches(memory).length, 1);
     assert.equal(memory.counts.yamato, 1);
     assert.match(memory.states.get("yamato")?.fingerprint ?? "", new RegExp(`^yamato:v3:rules=${EXTRACTOR_VERSION}:model=test-model:`));
   } finally {
@@ -387,7 +387,7 @@ test("changed Japan Post PDF is downloaded once, attached to the model, and atom
     assert.equal((await quietSync(() => syncAll(env(memory.db)))).japan_post, 1);
     assert.equal(pdfFetches, 1, "the PDF must be downloaded once and reused for both the hash and the model");
     assert.equal(extractionCalls, 1);
-    assert.equal(memory.batches.length, 1);
+    assert.equal(restrictionBatches(memory).length, 1);
     assert.equal(memory.counts.japan_post, 1);
     assert.match(memory.states.get("japan_post")?.fingerprint ?? "", new RegExp(`^japan-post:pdf-v1:rules=${EXTRACTOR_VERSION}:model=test-model:pdfsha=`));
   } finally {
@@ -411,7 +411,7 @@ test("Japan Post no_active_restrictions stores the authoritative empty set", asy
 
   try {
     assert.equal((await quietSync(() => syncAll(env(memory.db)))).japan_post, 0);
-    assert.equal(memory.batches.length, 1, "the whole document was read, so the empty set is stored");
+    assert.equal(restrictionBatches(memory).length, 1, "the whole document was read, so the empty set is stored");
     assert.equal(memory.counts.japan_post, 0);
     assert.notEqual(memory.states.get("japan_post")?.fingerprint, oldFingerprint);
   } finally {
@@ -448,7 +448,7 @@ test("Japan Post unreadable or self-contradicting output fails the carrier and r
         assert.equal(error.failures[0]?.phase, "extract");
         return true;
       });
-      assert.equal(memory.batches.length, 0, "a failed determination must never replace stored rows");
+      assert.equal(restrictionBatches(memory).length, 0, "a failed determination must never replace stored rows");
       assert.equal(memory.counts.japan_post, 9);
       assert.equal(memory.states.get("japan_post")?.fingerprint, oldFingerprint);
     } finally {
@@ -485,7 +485,7 @@ test("a newly listed Sagawa article ID is fetched, extracted, and accepted dynam
     assert.equal((await quietSync(() => syncAll(env(memory.db)))).sagawa, 1);
     assert.equal(articleFetches, 1);
     assert.equal(extractionCalls, 1);
-    assert.equal(memory.batches.length, 1);
+    assert.equal(restrictionBatches(memory).length, 1);
     assert.equal(memory.counts.sagawa, 1);
     assert.match(memory.states.get("sagawa")?.source_urls_json ?? "", /detail\/999/);
     assert.equal(memory.articles.get(`sagawa|${sagawaArticle999}`)?.source_updated_at, "2026-08-16");
@@ -516,7 +516,7 @@ test("failed Sagawa article extraction preserves restrictions and fingerprint fo
       assert.equal(error.failures[0]?.carrier, "sagawa");
       return true;
     });
-    assert.equal(memory.batches.length, 0);
+    assert.equal(restrictionBatches(memory).length, 0);
     assert.equal(memory.counts.sagawa, 6);
     assert.equal(memory.states.get("sagawa")?.fingerprint, oldFingerprint);
   } finally {
@@ -574,6 +574,18 @@ test("every carrier fingerprint carries the extractor rules version", async () =
 
   assert.ok(EXTRACTOR_VERSION.length > 0, "the extractor version must never be empty");
 });
+
+/**
+ * The atomic restriction-replacement batches, which is what these tests count.
+ * Token-usage bookkeeping is written in its own batch on every billed run —
+ * including runs that then fail — so it is excluded here rather than inflating
+ * every replacement count.
+ */
+function restrictionBatches(memory: ReturnType<typeof createInMemoryD1>) {
+  return memory.batches.filter(
+    (statements) => !statements.every(({ sql }) => /INSERT\s+INTO\s+token_usage/i.test(sql)),
+  );
+}
 
 /** Column order of the delivery_restrictions INSERT built in storage/restrictions.ts. */
 const POSTAL_CODES_JSON_INDEX = 7;
