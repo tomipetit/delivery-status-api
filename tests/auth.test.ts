@@ -63,6 +63,9 @@ function env(db: D1Database) {
     API_KEY: adminKey,
     OPENAI_API_KEY: "test-openai-key",
     OPENAI_MODEL: model,
+    // Reporting is not exercised by the auth tests; an unconfigured webhook
+    // makes sendUsageReport a no-op, so nothing is ever posted.
+    GOOGLE_CHAT_WEBHOOK_URL: "",
   };
 }
 

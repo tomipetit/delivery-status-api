@@ -4,6 +4,8 @@ import {
   extractRestrictions,
   extractRestrictionsFromPdf,
   type JapanPostExtractionResult,
+  type TokenUsageRecord,
+  type TokenUsageSink,
 } from "./ai/terra";
 import {
   fetchSagawaArticle,
@@ -23,6 +25,7 @@ import {
   type CarrierSourceArticle,
 } from "./storage/source-articles";
 import { getCarrierSourceState, touchCarrierSourceState } from "./storage/source-states";
+import { recordTokenUsage } from "./storage/token-usage";
 import { checkedToday } from "./tokyo-day";
 import type { Carrier, DeliveryRestriction, SourceDocument } from "./types/restriction";
 
@@ -129,6 +132,7 @@ async function syncYamato(
   env: SyncEnv,
   counts: Record<Carrier, number>,
   failures: CarrierSyncFailure[],
+  sink: TokenUsageSink,
 ): Promise<void> {
   const now = new Date();
   const previousState = await getCarrierSourceState(env.DB, "yamato");
@@ -174,7 +178,7 @@ async function syncYamato(
   let restrictions: DeliveryRestriction[];
   try {
     restrictions = deduplicateRestrictions(
-      await extractRestrictions(source, env.OPENAI_API_KEY, env.OPENAI_MODEL),
+      await extractRestrictions(source, env.OPENAI_API_KEY, env.OPENAI_MODEL, sink),
     );
   } catch (reason) {
     const failure = {
@@ -235,6 +239,7 @@ async function syncJapanPost(
   env: SyncEnv,
   counts: Record<Carrier, number>,
   failures: CarrierSyncFailure[],
+  sink: TokenUsageSink,
 ): Promise<void> {
   const now = new Date();
   const previousState = await getCarrierSourceState(env.DB, "japan_post");
@@ -276,6 +281,7 @@ async function syncJapanPost(
       probe.pdf,
       env.OPENAI_API_KEY,
       env.OPENAI_MODEL,
+      sink,
     );
   } catch (reason) {
     // Covers an unreadable document and any determination that contradicts the
@@ -317,6 +323,7 @@ async function syncSagawa(
   env: SyncEnv,
   counts: Record<Carrier, number>,
   failures: CarrierSyncFailure[],
+  sink: TokenUsageSink,
 ): Promise<void> {
   const now = new Date();
   const previousState = await getCarrierSourceState(env.DB, "sagawa");
@@ -391,7 +398,12 @@ async function syncSagawa(
       }
 
       try {
-        const extracted = await extractRestrictions(document, env.OPENAI_API_KEY, env.OPENAI_MODEL);
+        const extracted = await extractRestrictions(
+          document,
+          env.OPENAI_API_KEY,
+          env.OPENAI_MODEL,
+          sink,
+        );
         articleRestrictions = extracted.map((restriction) => ({
           ...restriction,
           sourceUrl: article.url,
@@ -471,12 +483,26 @@ export async function syncAll(env: SyncEnv): Promise<Record<Carrier, number>> {
     japan_post: await countCarrierRestrictions(env.DB, "japan_post"),
   };
   const failures: CarrierSyncFailure[] = [];
+  const usage: TokenUsageRecord[] = [];
+  const sink: TokenUsageSink = (record) => { usage.push(record); };
 
-  await syncYamato(env, counts, failures);
+  try {
+    await syncYamato(env, counts, failures, sink);
 
-  // Keep external calls sequential to avoid avoidable API bursts.
-  await syncSagawa(env, counts, failures);
-  await syncJapanPost(env, counts, failures);
+    // Keep external calls sequential to avoid avoidable API bursts.
+    await syncSagawa(env, counts, failures, sink);
+    await syncJapanPost(env, counts, failures, sink);
+  } finally {
+    // A run that fails part-way has still been billed for the calls it made, so
+    // the usage is written whatever happens — including on the SyncError path.
+    try {
+      await recordTokenUsage(env.DB, usage, new Date());
+    } catch (reason) {
+      // Accounting is diagnostic: losing it must not turn a good sync into a
+      // failed one, nor mask the SyncError this block may be unwinding.
+      console.error(`[usage] persisting ${usage.length} record(s) failed: ${errorMessage(reason)}`);
+    }
+  }
 
   if (failures.length > 0) throw new SyncError(counts, failures);
   return counts;

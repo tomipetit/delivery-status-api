@@ -24,6 +24,14 @@ export function tokyoCalendarDayStartIso(value: Date): string {
   return new Date(`${tokyoCalendarDate(value)}T00:00:00+09:00`).toISOString();
 }
 
+/**
+ * The Tokyo calendar day before the one containing `value`. Japan has no DST,
+ * so stepping back 24 hours always lands in the previous calendar day.
+ */
+export function tokyoPreviousCalendarDate(value: Date): string {
+  return tokyoCalendarDate(new Date(value.getTime() - 24 * 60 * 60 * 1000));
+}
+
 export function checkedToday(lastCheckedAt: string, now: Date): boolean {
   const previous = new Date(lastCheckedAt);
   return Number.isFinite(previous.getTime())
