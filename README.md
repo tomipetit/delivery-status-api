@@ -321,6 +321,19 @@ curl \
 npm run deploy
 ```
 
+### Cloudflare Workers Builds（Git連携の自動デプロイ）を使う場合
+
+リポジトリの`wrangler.jsonc`は`database_id`がプレースホルダのままなので、デプロイ時に実際のIDを差し込みます。Cloudflareダッシュボードの対象Worker → **Settings → Build**で次を設定してください。
+
+1. **Variables and secrets**（ビルド変数）に`D1_DATABASE_ID`として自分のD1のIDを登録します（`npx wrangler d1 list`で確認できます）。
+2. **Deploy command**を次のように変更します。
+
+```bash
+test -n "$D1_DATABASE_ID" && sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$D1_DATABASE_ID/" wrangler.jsonc && npx wrangler deploy
+```
+
+先頭の`test -n`により、`D1_DATABASE_ID`が未設定の場合はデプロイ前にコマンドが失敗します。設定漏れのまま本番へ反映されることはありません（現在稼働中のバージョンはそのまま残ります）。
+
 Cron Triggerは2本あります。
 
 ```text
