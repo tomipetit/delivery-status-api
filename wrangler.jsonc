@@ -22,7 +22,7 @@
 		{
 			"binding": "DB",
 			"database_name": "delivery-status",
-			"database_id": "1b01bb10-30b7-45a0-92f8-4f5c4c8b9148"
+			"database_id": "REPLACE_WITH_D1_DATABASE_ID"
 		}
 	],
 	// The daily token-usage report posts to Google Chat. Its webhook URL carries

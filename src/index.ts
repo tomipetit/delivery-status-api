@@ -35,6 +35,26 @@ function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+async function sha256Bytes(value: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+}
+
+/**
+ * Compares the presented key with the admin key without a timing side channel.
+ *
+ * Both values are hashed first, so the comparison always runs over two 32-byte
+ * digests: neither the admin key's length nor the position of the first
+ * differing character can be inferred from how long the check takes. The loop
+ * accumulates differences instead of returning early for the same reason.
+ */
+async function isAdminKey(presented: string, adminKey: string | undefined): Promise<boolean> {
+  if (typeof adminKey !== "string" || adminKey.length === 0) return false;
+  const [a, b] = await Promise.all([sha256Bytes(presented), sha256Bytes(adminKey)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
 /**
  * Resolves the presented credential to a principal, or null when the request is
  * not authenticated. Nothing here ever logs the presented key.
@@ -43,7 +63,7 @@ async function authenticate(request: Request, env: Env): Promise<Principal | nul
   const presented = bearerToken(request);
   if (presented === null) return null;
 
-  if (typeof env.API_KEY === "string" && env.API_KEY.length > 0 && presented === env.API_KEY) {
+  if (await isAdminKey(presented, env.API_KEY)) {
     return { kind: "admin" };
   }
 
