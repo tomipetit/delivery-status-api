@@ -53,6 +53,17 @@ test("summarizeErrorBody drops scripts, styles and comments", () => {
   );
 });
 
+test("describeHttpFailure cannot produce Google Chat mentions or links", async () => {
+  const response = new Response("<p>&lt;users/all&gt; see &lt;https://evil.example|here&gt;</p>", {
+    status: 403,
+    headers: { server: "<users/all>" },
+  });
+  const description = await describeHttpFailure(response);
+  assert.doesNotMatch(description, /[<>]/);
+  assert.match(description, /server=‹users\/all›/);
+  assert.match(description, /‹users\/all› see ‹https:\/\/evil\.example\|here›/);
+});
+
 test("fetchYamatoStatus puts the failure details in its error", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(AKAMAI_DENIED_PAGE, {

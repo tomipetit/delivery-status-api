@@ -33,6 +33,16 @@ const BODY_READ_LIMIT = 16 * 1024;
 const BODY_SNIPPET_LIMIT = 300;
 const HEADER_VALUE_LIMIT = 120;
 
+/**
+ * Replaces angle brackets with look-alikes. Google Chat reads `<users/all>` as
+ * an @all mention and `<url|text>` as a link, and this text comes from a
+ * third-party server and ends up in a chat post, so it must not be able to
+ * produce either. Applied after entity decoding, which can create brackets.
+ */
+function neutralizeChatMarkup(value: string): string {
+  return value.replace(/</g, "‹").replace(/>/g, "›");
+}
+
 function truncate(value: string, limit: number): string {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
@@ -75,7 +85,7 @@ export function summarizeErrorBody(body: string): string {
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return truncate(text, BODY_SNIPPET_LIMIT);
+  return truncate(neutralizeChatMarkup(text), BODY_SNIPPET_LIMIT);
 }
 
 /**
@@ -91,14 +101,14 @@ export async function describeHttpFailure(response: Response): Promise<string> {
 
   const headers = DIAGNOSTIC_HEADERS.flatMap((name) => {
     const value = response.headers.get(name);
-    return value ? [`${name}=${truncate(value, HEADER_VALUE_LIMIT)}`] : [];
+    return value ? [`${name}=${truncate(neutralizeChatMarkup(value), HEADER_VALUE_LIMIT)}`] : [];
   });
 
   let body = "";
   try {
     body = summarizeErrorBody(await readBodyPrefix(response));
   } catch (reason) {
-    body = `<unreadable: ${reason instanceof Error ? reason.message : String(reason)}>`;
+    body = `(unreadable: ${neutralizeChatMarkup(reason instanceof Error ? reason.message : String(reason))})`;
   }
 
   return [
