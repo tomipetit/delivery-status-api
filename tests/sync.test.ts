@@ -680,3 +680,42 @@ test("a failing postal lookup never drops a restriction or fails the sync", asyn
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Sagawa reads the consolidated status article and skips the notices it superseded", async () => {
+  const memory = createInMemoryD1({ states: currentSkipStates() });
+  memory.states.delete("sagawa");
+  const fetchedArticles: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = requestUrl(input);
+    if (url === sagawaListXmlUrl) {
+      return new Response(sagawaListXml([
+        { id: "436", title: "台風の影響によるお届け遅延について", publishedAt: "2026-11-15" },
+        { id: "417", title: "お荷物の集配および営業所の営業状況", publishedAt: "2026-11-10" },
+        { id: "320", title: "石川県能登半島で発生した地震・大雨に伴う配送への影響について", publishedAt: "2025-08-18" },
+      ]));
+    }
+    for (const id of ["436", "417", "320"]) {
+      if (url === sagawaArticleXmlUrl(id)) {
+        fetchedArticles.push(id);
+        return new Response(sagawaArticleXml(id, id === "436" ? "2026-11-15" : id === "417" ? "2026-11-10" : "2025-08-18"));
+      }
+    }
+    if (url === openAiResponsesUrl) return sagawaExtractionResponse();
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  try {
+    await quietSync(() => syncAll(env(memory.db)));
+    assert.deepEqual(fetchedArticles.sort(), ["417", "436"]);
+    assert.deepEqual(
+      [...memory.articles.keys()].sort(),
+      [
+        "sagawa|https://www2.sagawa-exp.co.jp/information/detail/417/",
+        "sagawa|https://www2.sagawa-exp.co.jp/information/detail/436/",
+      ],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -10,6 +10,7 @@ import {
 import {
   fetchSagawaArticle,
   fetchSagawaArticleList,
+  selectCurrentSagawaArticles,
   type SagawaArticleSummary,
 } from "./scrapers/sagawa";
 import { describeHttpFailure } from "./http-failure";
@@ -360,8 +361,14 @@ async function syncSagawa(
   const cachedByUrl = new Map(cachedArticles.map((article) => [article.sourceUrl, article]));
   const currentArticles: CarrierSourceArticle[] = [];
   let extractedArticles = 0;
+  const selection = selectCurrentSagawaArticles(articles);
+  if (selection.consolidated !== null) {
+    console.info(
+      `[sync] sagawa: consolidated=${selection.consolidated.url} (${selection.consolidated.publishedAt}) superseded=${selection.superseded.length}`,
+    );
+  }
 
-  for (const article of articles) {
+  for (const article of selection.current) {
     // The official XML carries the publication date, so this fingerprint is
     // stable across runs and only moves when the article itself changes.
     const articleFingerprint = await sha256Hex(JSON.stringify({
