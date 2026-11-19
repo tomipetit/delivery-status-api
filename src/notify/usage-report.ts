@@ -11,7 +11,8 @@ import {
   type TokenUsageMonthTotal,
   type TokenUsageSummary,
 } from "../storage/token-usage";
-import type { CarrierSyncFailure } from "../sync";
+import { formatTokyoDateTime, type CarrierFreshness } from "../freshness";
+import type { CarrierSyncFailure, CarrierSyncWarning } from "../sync";
 
 export interface UsageReportEnv extends PricingVars {
   DB: D1Database;
@@ -30,6 +31,10 @@ export interface SyncOutcome {
   failures: readonly CarrierSyncFailure[];
   /** Set when the run threw something other than a per-carrier SyncError. */
   abortMessage: string | null;
+  /** Results that finished but look wrong: zero or sharply fewer records, stale data. */
+  warnings?: readonly CarrierSyncWarning[];
+  /** When each carrier was last checked successfully, printed on every report. */
+  freshness?: readonly CarrierFreshness[];
 }
 
 interface ReportInput extends SyncOutcome {
@@ -101,7 +106,8 @@ function dayTokens(summary: TokenUsageSummary) {
 
 export function usageReportMessage(input: ReportInput): string {
   const { summary, month, pricing, failures } = input;
-  const status = isHealthy(input) ? "" : "⚠️ 同期失敗 ";
+  const warnings = input.warnings ?? [];
+  const status = !isHealthy(input) ? "⚠️ 同期失敗 " : warnings.length > 0 ? "⚠️ 要確認 " : "";
   const dayCost = estimateCostUsd(dayTokens(summary), pricing);
   const monthCost = estimateCostUsd(month, pricing);
   const lines = [
@@ -144,6 +150,20 @@ export function usageReportMessage(input: ReportInput): string {
     for (const failure of failures) {
       lines.push(`• ${failure.carrier} [${failure.phase}] ${fenceSafe(failure.message)}`);
     }
+  }
+
+  if (warnings.length > 0) {
+    lines.push("", "*要確認:*");
+    for (const warning of warnings) {
+      lines.push(`• ${warning.carrier} ${fenceSafe(warning.message)}`);
+    }
+  }
+
+  if (input.freshness !== undefined && input.freshness.length > 0) {
+    const entries = input.freshness.map(({ carrier, lastCheckedAt }) => (
+      `${carrier} ${lastCheckedAt === null ? "未確認" : formatTokyoDateTime(lastCheckedAt)}`
+    ));
+    lines.push("", `最終確認 (JST): ${entries.join(" / ")}`);
   }
 
   return lines.join("\n");
