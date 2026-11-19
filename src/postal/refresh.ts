@@ -1,3 +1,4 @@
+import { describeHttpFailure } from "../http-failure";
 import { tokyoCalendarDate } from "../tokyo-day";
 import { parseKenAllCsv, type PostalCodeRecord } from "./ken-all";
 import { readZipCsvText } from "./zip";
@@ -45,7 +46,7 @@ export function monthlyArchiveNames(now: Date): { yymm: string; add: string; del
 async function fetchMonthlyRecords(fileName: string): Promise<PostalCodeRecord[] | null> {
   const response = await fetch(`${KEN_ALL_DOWNLOAD_BASE}${fileName}`, { headers: REQUEST_HEADERS });
   if (response.status === 404) return null;
-  if (!response.ok) throw new Error(`${fileName} fetch failed: ${response.status}`);
+  if (!response.ok) throw new Error(`${fileName} fetch failed: ${await describeHttpFailure(response)}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
   return parseKenAllCsv(await readZipCsvText(bytes));
 }

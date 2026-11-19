@@ -1,4 +1,5 @@
 import type { SourceDocument } from "../types/restriction";
+import { describeHttpFailure } from "../http-failure";
 import { decodeHtmlEntities, htmlToStructuredText } from "./html";
 
 const SAGAWA_ARTICLE_LIST_XML_URL =
@@ -143,7 +144,7 @@ export async function fetchSagawaArticleList(): Promise<SagawaArticleSummary[]> 
     headers: { "user-agent": "delivery-status-api/0.1" },
   });
 
-  if (!response.ok) throw new Error(`Sagawa article list fetch failed: ${response.status}`);
+  if (!response.ok) throw new Error(`Sagawa article list fetch failed: ${await describeHttpFailure(response)}`);
 
   return parseSagawaArticleList(await response.text());
 }
@@ -154,7 +155,7 @@ export async function fetchSagawaArticle(summary: SagawaArticleSummary): Promise
   });
 
   if (!response.ok) {
-    throw new Error(`Sagawa article fetch failed (${summary.url}): ${response.status}`);
+    throw new Error(`Sagawa article fetch failed (${summary.url}): ${await describeHttpFailure(response)}`);
   }
 
   const document = parseSagawaArticleBody(await response.text(), summary.url);

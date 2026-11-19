@@ -12,6 +12,7 @@ import {
   fetchSagawaArticleList,
   type SagawaArticleSummary,
 } from "./scrapers/sagawa";
+import { describeHttpFailure } from "./http-failure";
 import { fetchYamatoStatus, yamatoFingerprintText } from "./scrapers/yamato";
 import { createMunicipalityRowCache, resolvePostalCodes } from "./postal/lookup";
 import { sha256Hex } from "./source-fingerprint";
@@ -226,7 +227,7 @@ export async function fetchJapanPostFingerprint(): Promise<{
   const response = await fetch(JAPAN_POST_STATUS_URL, {
     headers: { "user-agent": "delivery-status-api/0.1" },
   });
-  if (!response.ok) throw new Error(`Japan Post probe failed: ${response.status}`);
+  if (!response.ok) throw new Error(`Japan Post probe failed: ${await describeHttpFailure(response)}`);
   const bytes = await response.arrayBuffer();
   return {
     fingerprint: `japan-post-pdf:v1:${await sha256Hex(bytes)}`,
