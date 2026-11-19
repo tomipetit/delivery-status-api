@@ -43,6 +43,49 @@ export interface CarrierSyncFailure {
   sourceUrl?: string;
 }
 
+/**
+ * Something a person should look at even though no carrier failed outright:
+ * the run finished, but its result looks like a page change broke extraction
+ * quietly. Reported alongside failures, never instead of them.
+ */
+export interface CarrierSyncWarning {
+  carrier: Carrier;
+  kind: "zero-extracted" | "count-zeroed" | "count-dropped" | "stale";
+  message: string;
+}
+
+/**
+ * A drop to half or less is flagged only from this many records upward, so the
+ * ordinary churn of a carrier with two or three restrictions stays quiet.
+ */
+const COUNT_DROP_MIN_PREVIOUS = 4;
+
+/** Warnings for a carrier whose stored count fell to zero or to half or less. */
+export function countChangeWarnings(
+  before: Record<Carrier, number>,
+  after: Record<Carrier, number>,
+): CarrierSyncWarning[] {
+  return (Object.keys(before) as Carrier[]).flatMap((carrier): CarrierSyncWarning[] => {
+    const previous = before[carrier];
+    const current = after[carrier];
+    if (previous > 0 && current === 0) {
+      return [{
+        carrier,
+        kind: "count-zeroed",
+        message: `件数が0件になりました（前回 ${previous}件）。停止がすべて解除されたのか、ページ構成の変更で読めなくなったのかを確認してください。`,
+      }];
+    }
+    if (previous >= COUNT_DROP_MIN_PREVIOUS && current * 2 <= previous) {
+      return [{
+        carrier,
+        kind: "count-dropped",
+        message: `件数が ${previous}件 → ${current}件 に減りました。ページ構成の変更で一部を読めなくなっていないか確認してください。`,
+      }];
+    }
+    return [];
+  });
+}
+
 export class SyncError extends Error {
   constructor(
     public readonly counts: Record<Carrier, number>,
@@ -133,6 +176,7 @@ async function syncYamato(
   env: SyncEnv,
   counts: Record<Carrier, number>,
   failures: CarrierSyncFailure[],
+  warnings: CarrierSyncWarning[],
   sink: TokenUsageSink,
 ): Promise<void> {
   const now = new Date();
@@ -198,6 +242,13 @@ async function syncYamato(
     // Direct page extraction has no explicit, evidence-backed "none active"
     // determination, so it cannot safely authorize destructive replacement.
     console.warn("[sync] yamato: extraction returned zero restrictions; preserving existing data");
+    // The stored count does not move on this path, so the before/after
+    // comparison in syncAll cannot see it; it has to be reported here.
+    warnings.push({
+      carrier: "yamato",
+      kind: "zero-extracted",
+      message: `抽出結果が0件だったため、既存のデータ（${counts.yamato}件）を残しました。ページ構成の変更で読めなくなっていないか確認してください。`,
+    });
     return;
   }
 
@@ -477,18 +528,27 @@ async function syncSagawa(
   }
 }
 
-export async function syncAll(env: SyncEnv): Promise<Record<Carrier, number>> {
+/**
+ * Runs every carrier's sync. Warnings — results that finished but look wrong —
+ * are appended to `warnings`, which the caller reads on both the success and
+ * the SyncError path.
+ */
+export async function syncAll(
+  env: SyncEnv,
+  warnings: CarrierSyncWarning[] = [],
+): Promise<Record<Carrier, number>> {
   const counts: Record<Carrier, number> = {
     yamato: await countCarrierRestrictions(env.DB, "yamato"),
     sagawa: await countCarrierRestrictions(env.DB, "sagawa"),
     japan_post: await countCarrierRestrictions(env.DB, "japan_post"),
   };
+  const countsBefore = { ...counts };
   const failures: CarrierSyncFailure[] = [];
   const usage: TokenUsageRecord[] = [];
   const sink: TokenUsageSink = (record) => { usage.push(record); };
 
   try {
-    await syncYamato(env, counts, failures, sink);
+    await syncYamato(env, counts, failures, warnings, sink);
 
     // Keep external calls sequential to avoid avoidable API bursts.
     await syncSagawa(env, counts, failures, sink);
@@ -504,6 +564,9 @@ export async function syncAll(env: SyncEnv): Promise<Record<Carrier, number>> {
       console.error(`[usage] persisting ${usage.length} record(s) failed: ${errorMessage(reason)}`);
     }
   }
+
+  warnings.push(...countChangeWarnings(countsBefore, counts));
+  for (const warning of warnings) console.warn(`[sync] warning ${warning.carrier} [${warning.kind}] ${warning.message}`);
 
   if (failures.length > 0) throw new SyncError(counts, failures);
   return counts;

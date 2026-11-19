@@ -77,3 +77,13 @@ export async function touchCarrierSourceState(
     checkedAt,
   ).run();
 }
+
+/** When each carrier last completed a check, keyed by carrier; absent when never. */
+export async function listCarrierLastCheckedAt(db: D1Database): Promise<Partial<Record<Carrier, string>>> {
+  const { results } = await db.prepare(`
+    SELECT carrier, last_checked_at FROM carrier_source_states
+  `).all<Record<string, unknown>>();
+  const lastChecked: Partial<Record<Carrier, string>> = {};
+  for (const row of results ?? []) lastChecked[row.carrier as Carrier] = String(row.last_checked_at);
+  return lastChecked;
+}
