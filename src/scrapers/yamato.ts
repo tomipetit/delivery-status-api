@@ -22,6 +22,29 @@ function decodePageBody(buffer: ArrayBuffer): string {
   return utf8;
 }
 
+interface SuspensionSection {
+  lines: string[];
+  /**
+   * `marked`: the original layout, headings prefixed with ● and sections that
+   * hold suspensions only. `plain`: the 2026-11 redesign, unmarked headings
+   * ending in について whose tables also list delays and shortened hours.
+   */
+  layout: "marked" | "plain";
+}
+
+/**
+ * A heading of the redesigned page: a short line of its own ending in について,
+ * e.g. お届けの遅延・荷受け停止について. Table cells carry a "|" and prose carries
+ * a "。", so neither is mistaken for one.
+ */
+function isPlainYamatoHeading(trimmed: string): boolean {
+  return trimmed.length > 0
+    && trimmed.length <= 40
+    && !trimmed.includes("|")
+    && !trimmed.includes("。")
+    && trimmed.endsWith("について");
+}
+
 export function extractYamatoStatusText(text: string): string {
   if (!/停止|荷受け/.test(text)) {
     const diagnostic = text
@@ -36,21 +59,32 @@ export function extractYamatoStatusText(text: string): string {
   }
 
   const lines = text.split("\n");
-  const suspensionSections: string[][] = [];
+  const suspensionSections: SuspensionSection[] = [];
+  const seenPlainHeadings = new Set<string>();
   let currentSection: string[] | null = null;
 
   for (const line of lines) {
     const trimmed = line.trim();
     const isMarkedHeading = /^[●■◆◇]/.test(trimmed);
-    const isSuspensionHeading = isMarkedHeading && (
+    const isPlainHeading = !isMarkedHeading && isPlainYamatoHeading(trimmed);
+    const isSuspensionHeading = (isMarkedHeading && (
       /荷受け.{0,40}停止/.test(trimmed)
       || /集荷\s*[・･／/]\s*配達.{0,30}停止中/.test(trimmed)
-    );
+    )) || (isPlainHeading && (
+      /荷受け.{0,40}停止/.test(trimmed)
+      || /集荷\s*[・･／/]\s*配達/.test(trimmed)
+    ));
 
-    if (isMarkedHeading) {
-      if (isSuspensionHeading) {
+    if (isMarkedHeading || isPlainHeading) {
+      // The redesigned page renders every section twice: a PC table, then a
+      // smartphone layout of label/value pairs under the same heading. Only
+      // the first (table) copy is kept.
+      const duplicate = isPlainHeading && seenPlainHeadings.has(trimmed);
+      if (isPlainHeading) seenPlainHeadings.add(trimmed);
+
+      if (isSuspensionHeading && !duplicate) {
         currentSection = [line];
-        suspensionSections.push(currentSection);
+        suspensionSections.push({ lines: currentSection, layout: isPlainHeading ? "plain" : "marked" });
       } else {
         currentSection = null;
       }
@@ -81,6 +115,13 @@ export function extractYamatoStatusText(text: string): string {
   const statesSuspension = (row: string): boolean => (
     /(?:荷受け|お預かり|お引き取り|集荷|配達|引受け?)[^。\n]{0,20}(?:停止|休止|中止)/.test(row)
   );
+
+  // An area cell such as （※荷受け停止地域を除く） points at another row; it says
+  // nothing about the row it sits in.
+  const withoutExclusionNotes = (row: string): string => row
+    .replace(/[^。\n|]{0,20}(?:停止|休止|中止)[^。\n|]{0,6}を除く/g, "");
+
+  const isHeaderRow = (row: string): boolean => /^\s*都道府県\s*\|/m.test(row);
 
   const isOperatingRow = (row: string): boolean => {
     const remarks = normalizeRemarks(row);
@@ -113,14 +154,24 @@ export function extractYamatoStatusText(text: string): string {
     endsWithCellDelimiter(line) && (line.match(/\|/g)?.length ?? 0) >= 2
   );
 
-  const filterOperatingTableRows = (section: string[]): string[] => {
+  // Marked sections were headed as suspensions, so every row stays unless it
+  // says it is operating. The redesigned sections mix suspensions with delays
+  // and shortened hours (お届けの遅延・荷受け停止について, ドライバーによる集荷・配達
+  // 状況について), so there a row stays only when it states a suspension itself.
+  const keepsRow = (row: string, layout: SuspensionSection["layout"]): boolean => {
+    if (isOperatingRow(row)) return false;
+    if (layout === "marked") return true;
+    return isHeaderRow(row) || statesSuspension(normalizeRemarks(withoutExclusionNotes(row)));
+  };
+
+  const filterOperatingTableRows = (section: string[], layout: SuspensionSection["layout"]): string[] => {
     const result = [section[0]];
     let logicalRow: string[] = [];
     let lastContentLine = "";
 
     const flushLogicalRow = (): void => {
       if (logicalRow.length === 0) return;
-      if (!isOperatingRow(logicalRow.join("\n"))) result.push(...logicalRow);
+      if (keepsRow(logicalRow.join("\n"), layout)) result.push(...logicalRow);
       logicalRow = [];
       lastContentLine = "";
     };
@@ -152,7 +203,7 @@ export function extractYamatoStatusText(text: string): string {
   // suspension sections preserves table headers, continuation rows, service
   // columns, and remarks while excluding neighboring delay-only sections.
   const suspensionText = suspensionSections
-    .map((section) => filterOperatingTableRows(trimAfterLastTableRow(section))
+    .map((section) => filterOperatingTableRows(trimAfterLastTableRow(section.lines), section.layout)
       .join("\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim())
@@ -160,7 +211,7 @@ export function extractYamatoStatusText(text: string): string {
     .join("\n\n");
 
   return [
-    "The following text contains only Yamato Transport sections explicitly headed as acceptance suspension or pickup/delivery suspension.",
+    "The following text contains only Yamato Transport sections headed as acceptance suspension or pickup/delivery status; rows that only announce delays or shortened hours have already been removed.",
     "It includes table headings and adjacent rows so geographical values omitted by rowspan-like formatting retain their context.",
     "Complete suspension-section tables are retained so service limitations and suspension remarks remain available.",
     "A row inside a suspension section is not necessarily suspended: exclude it when its own remarks say pickup/delivery is operating or otherwise continuing.",

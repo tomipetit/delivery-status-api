@@ -254,3 +254,134 @@ test("extractYamatoStatusText still sends the 時現在 stamp to the model", () 
   );
   assert.doesNotMatch(yamatoFingerprintText(extracted), /時現在/);
 });
+
+// The 2026-11 redesign: unmarked headings ending in について, tables that mix
+// delays, shortened hours and suspensions, and every section repeated in a
+// smartphone label/value layout after the PC table.
+const redesignedPage = [
+  "お荷物の集配および営業所の営業状況について",
+  "",
+  "お届けの遅延・荷受け停止について",
+  "",
+  "ただいま、下記地域のお荷物についてお届けに遅れなどが生じております（営業所へのお引取りを含む）。",
+  "",
+  "2026年11月19日　10時現在",
+  "",
+  "都道府県 | ",
+  "地域詳細 | ",
+  "対象商品 | ",
+  "制限内容 | ",
+  "理由 | ",
+  "備考 | ",
+  "期間 | ",
+  "",
+  "東京都 | ",
+  "八丈島八丈町・青ヶ島村 | ",
+  "全商品 | ",
+  "遅延 | ",
+  "海上シケによる船便運行の影響 | ",
+  "該当地域を発着するお荷物のお届けに遅延が発生いたします。 | ",
+  "2025年10月17日",
+  "より | ",
+  "",
+  "鹿児島県 | ",
+  "西之表市・奄美市",
+  "",
+  "・上記地域⇔全国を発着するお荷物",
+  "",
+  "| ",
+  "全商品 | ",
+  "遅延 | ",
+  "船便運航状況・積載制限の影響 | ",
+  "お届けには遅延が発生しております。 | ",
+  "2026年11月5日",
+  "より | ",
+  "",
+  "千葉県 | ",
+  "成田市成田国際空港 | ",
+  "空港宅急便 | ",
+  "荷受け停止 | ",
+  "空港施設の都合 | ",
+  "空港宅急便の荷受けを停止しております | ",
+  "2026年11月1日",
+  "より | ",
+  "",
+  "※なお、上記周辺の地域でも状況により遅延が発生することがございます。",
+  "",
+  "ドライバーによる集荷・配達状況について",
+  "",
+  "ただいま、下記の地域でのお荷物の集荷・配達について、一時的に制限がでております。",
+  "",
+  "2026年11月19日　10時現在",
+  "",
+  "都道府県 | ",
+  "地域詳細 | ",
+  "対象商品 | ",
+  "理由 | ",
+  "備考 | ",
+  "期間 | ",
+  "",
+  "石川県 | ",
+  "・珠洲市、輪島市",
+  "　（※荷受け停止地域を除く） | ",
+  "宅急便（ドライ・クール） | ",
+  "地震 | ",
+  "能登半島地震の影響により、お荷物のお届けに遅延が発生いたします。",
+  "※該当地域につきましては安全上１６時頃までの『集荷』１７時頃までの『配達』とさせていただきます。 | ",
+  "2026年11月17日",
+  "より | ",
+  "",
+  "石川県 | ",
+  "・輪島市",
+  "門前町西円山、別所谷町",
+  "| ",
+  "全商品 | ",
+  "地震 | ",
+  "能登半島地震の影響により、集荷・配達業務を停止しております。 | ",
+  "2026年11月17日",
+  "より | ",
+  "",
+  "お荷物の集配および営業所の営業状況について",
+  "",
+  "お届けの遅延・荷受け停止について",
+  "",
+  "都道府県 | ",
+  "東京都 | ",
+  "",
+  "ドライバーによる集荷・配達状況について",
+  "",
+  "都道府県 | ",
+  "石川県 | ",
+  "地域詳細 | ",
+  "・輪島市 門前町西円山 | ",
+].join("\n");
+
+test("extractYamatoStatusText reads the redesigned page with unmarked headings", () => {
+  const extracted = extractYamatoStatusText(redesignedPage);
+
+  assert.match(extracted, /お届けの遅延・荷受け停止について/);
+  assert.match(extracted, /ドライバーによる集荷・配達状況について/);
+  assert.match(extracted, /空港宅急便の荷受けを停止しております/);
+  assert.match(extracted, /門前町西円山、別所谷町/);
+  assert.match(extracted, /集荷・配達業務を停止しております/);
+  // Table headers stay so the model keeps column context.
+  assert.match(extracted, /制限内容 \|/);
+});
+
+test("extractYamatoStatusText drops delay-only and shortened-hours rows on the redesigned page", () => {
+  const extracted = extractYamatoStatusText(redesignedPage);
+
+  assert.doesNotMatch(extracted, /八丈島/);
+  assert.doesNotMatch(extracted, /西之表市/);
+  assert.doesNotMatch(extracted, /珠洲市、輪島市/);
+  assert.doesNotMatch(extracted, /１６時頃までの/);
+  assert.doesNotMatch(extracted, /上記周辺の地域でも/);
+});
+
+test("extractYamatoStatusText keeps only the first copy of each redesigned section", () => {
+  const extracted = extractYamatoStatusText(redesignedPage);
+
+  assert.equal(extracted.match(/ドライバーによる集荷・配達状況について/g)?.length, 1);
+  assert.equal(extracted.match(/お届けの遅延・荷受け停止について/g)?.length, 1);
+  assert.doesNotMatch(extracted, /・輪島市 門前町西円山 \|/);
+});
