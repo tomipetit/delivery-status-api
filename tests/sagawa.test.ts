@@ -6,6 +6,7 @@ import {
   fetchSagawaArticleList,
   parseSagawaArticleBody,
   parseSagawaArticleList,
+  selectCurrentSagawaArticles,
   type SagawaArticleSummary,
 } from "../src/scrapers/sagawa.ts";
 
@@ -557,4 +558,44 @@ test("fetchSagawaArticle falls back to the list summary title and date when the 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+function summary(id: string, title: string, publishedAt: string): SagawaArticleSummary {
+  return { id, url: `https://www2.sagawa-exp.co.jp/information/detail/${id}/`, title, publishedAt };
+}
+
+test("selectCurrentSagawaArticles drops notices older than the consolidated status article", () => {
+  const consolidated = summary("417", "お荷物の集配および営業所の営業状況", "2026-11-10");
+  const newer = summary("436", "台風の影響によるお届け遅延について", "2026-11-15");
+  const sameDay = summary("433", "大雨の影響について", "2026-11-10");
+  const older = summary("320", "石川県能登半島で発生した地震・大雨に伴う配送への影響について", "2025-08-18");
+
+  const selection = selectCurrentSagawaArticles([newer, consolidated, sameDay, older]);
+
+  assert.equal(selection.consolidated, consolidated);
+  assert.deepEqual(selection.current.map(({ id }) => id), ["436", "417", "433"]);
+  assert.deepEqual(selection.superseded.map(({ id }) => id), ["320"]);
+});
+
+test("selectCurrentSagawaArticles uses the newest consolidated article when several are listed", () => {
+  const latest = summary("417", "お荷物の集配および営業所の営業状況", "2026-11-10");
+  const previous = summary("390", "お荷物の集配および営業所の営業状況", "2026-05-01");
+
+  const selection = selectCurrentSagawaArticles([previous, latest]);
+
+  assert.equal(selection.consolidated, latest);
+  assert.deepEqual(selection.superseded.map(({ id }) => id), ["390"]);
+});
+
+test("selectCurrentSagawaArticles keeps every article when there is no consolidated one", () => {
+  const articles = [
+    summary("436", "台風の影響によるお届け遅延について", "2026-11-15"),
+    summary("320", "石川県能登半島で発生した地震・大雨に伴う配送への影響について", "2025-08-18"),
+  ];
+
+  const selection = selectCurrentSagawaArticles(articles);
+
+  assert.equal(selection.consolidated, null);
+  assert.deepEqual(selection.current, articles);
+  assert.deepEqual(selection.superseded, []);
 });
