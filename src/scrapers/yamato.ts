@@ -1,4 +1,5 @@
 import type { SourceDocument } from "../types/restriction";
+import { describeHttpFailure } from "../http-failure";
 import { htmlToStructuredText } from "./html";
 
 const YAMATO_STATUS_URL = "https://www.kuronekoyamato.co.jp/ytc/chien/chien_hp.html";
@@ -196,7 +197,7 @@ export async function fetchYamatoStatus(): Promise<SourceDocument> {
     headers: { "user-agent": "delivery-status-api/0.1" },
   });
 
-  if (!response.ok) throw new Error(`Yamato fetch failed: ${response.status}`);
+  if (!response.ok) throw new Error(`Yamato fetch failed: ${await describeHttpFailure(response)}`);
 
   const buffer = await response.arrayBuffer();
   const html = decodePageBody(buffer);
