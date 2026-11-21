@@ -243,10 +243,42 @@ export function yamatoFingerprintText(text: string): string {
     .join("\n");
 }
 
-export async function fetchYamatoStatus(): Promise<SourceDocument> {
-  const response = await fetch(YAMATO_STATUS_URL, {
-    headers: { "user-agent": "delivery-status-api/0.1" },
-  });
+/**
+ * Yamato's site sits behind an Oracle WAF that answered the bare
+ * "delivery-status-api/0.1" agent with a 403 "Technical Difficulties" page on
+ * consecutive days (2026-11). The page is public and fetched once a day, so the
+ * request presents itself the way a Japanese-locale browser would.
+ */
+const YAMATO_REQUEST_HEADERS: Record<string, string> = {
+  "user-agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "accept-language": "ja,en-US;q=0.8,en;q=0.6",
+};
+
+/** Statuses worth a second try: a WAF hiccup, rate limiting, or an origin outage. */
+function isRetryableStatus(status: number): boolean {
+  return status === 403 || status === 429 || status >= 500;
+}
+
+export interface FetchYamatoOptions {
+  /** Wait before the single retry; tests pass 0. */
+  retryDelayMs?: number;
+}
+
+export async function fetchYamatoStatus(options: FetchYamatoOptions = {}): Promise<SourceDocument> {
+  const retryDelayMs = options.retryDelayMs ?? 5_000;
+  let response = await fetch(YAMATO_STATUS_URL, { headers: YAMATO_REQUEST_HEADERS });
+
+  if (!response.ok && isRetryableStatus(response.status)) {
+    const firstFailure = await describeHttpFailure(response);
+    console.warn(`[yamato] fetch attempt 1 failed, retrying: ${firstFailure}`);
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    response = await fetch(YAMATO_STATUS_URL, { headers: YAMATO_REQUEST_HEADERS });
+    if (!response.ok) {
+      throw new Error(`Yamato fetch failed after 2 attempts: ${await describeHttpFailure(response)}`);
+    }
+  }
 
   if (!response.ok) throw new Error(`Yamato fetch failed: ${await describeHttpFailure(response)}`);
 
