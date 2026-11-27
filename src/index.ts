@@ -2,7 +2,15 @@ import { sendUsageReport, type UsageReportEnv } from "./notify/usage-report";
 import { refreshPostalCodes } from "./postal/refresh";
 import { findActiveApiKey, touchApiKeyUsage } from "./storage/api-keys";
 import { listRestrictions } from "./storage/restrictions";
-import { SyncError, syncAll, type CarrierSyncFailure, type SyncEnv } from "./sync";
+import { carrierFreshness, staleCarrierWarnings, type CarrierFreshness } from "./freshness";
+import { listCarrierLastCheckedAt } from "./storage/source-states";
+import {
+  SyncError,
+  syncAll,
+  type CarrierSyncFailure,
+  type CarrierSyncWarning,
+  type SyncEnv,
+} from "./sync";
 import { tokyoPreviousCalendarDate } from "./tokyo-day";
 import type { Carrier } from "./types/restriction";
 
@@ -126,9 +134,10 @@ async function runPostalRefresh(env: Env): Promise<void> {
 async function runDailySync(env: Env): Promise<void> {
   let failures: readonly CarrierSyncFailure[] = [];
   let abortMessage: string | null = null;
+  const warnings: CarrierSyncWarning[] = [];
 
   try {
-    await syncAll(env);
+    await syncAll(env, warnings);
   } catch (reason) {
     if (reason instanceof SyncError) {
       failures = reason.failures;
@@ -139,8 +148,23 @@ async function runDailySync(env: Env): Promise<void> {
     }
   }
 
+  // Read after the sync so today's successful checks count as fresh. Like the
+  // report itself, this is observation: a failed read only loses the section.
+  let freshness: CarrierFreshness[] | undefined;
   try {
-    await sendUsageReport(env, tokyoPreviousCalendarDate(new Date()), { failures, abortMessage });
+    freshness = carrierFreshness(await listCarrierLastCheckedAt(env.DB));
+    warnings.push(...staleCarrierWarnings(freshness, new Date()));
+  } catch (reason) {
+    console.error(`[sync] freshness check failed: ${errorMessage(reason)}`);
+  }
+
+  try {
+    await sendUsageReport(env, tokyoPreviousCalendarDate(new Date()), {
+      failures,
+      abortMessage,
+      warnings,
+      freshness,
+    });
   } catch (reason) {
     // Reporting is observation, not the job: a notification failure must not be
     // able to take down the sync it is reporting on.
@@ -180,12 +204,13 @@ export default {
         return json({ error: "Forbidden" }, 403);
       }
 
+      const warnings: CarrierSyncWarning[] = [];
       try {
-        const counts = await syncAll(env);
-        return json({ ok: true, counts });
+        const counts = await syncAll(env, warnings);
+        return json({ ok: true, counts, warnings });
       } catch (error) {
         if (error instanceof SyncError) {
-          return json({ ok: false, counts: error.counts, failures: error.failures }, 502);
+          return json({ ok: false, counts: error.counts, failures: error.failures, warnings }, 502);
         }
         throw error;
       }

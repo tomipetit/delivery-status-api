@@ -132,6 +132,7 @@ test("the admin key reaches restrictions and sync", async () => {
   assert.deepEqual(await sync.json(), {
     ok: true,
     counts: { yamato: 1, sagawa: 0, japan_post: 0 },
+    warnings: [],
   });
 });
 

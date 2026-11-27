@@ -158,6 +158,9 @@ export function createInMemoryD1(options: {
             ) as T[],
           };
         }
+        if (/FROM\s+carrier_source_states/i.test(statement.sql)) {
+          return { results: [...states.values()] as T[] };
+        }
         if (/FROM\s+carrier_source_articles/i.test(statement.sql)) {
           const carrier = statement.values[0] as Carrier;
           return {
