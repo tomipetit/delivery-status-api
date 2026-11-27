@@ -9,6 +9,14 @@
 	"observability": {
 		"enabled": true
 	},
+	// Run near Yamato's site. Its WAF answered the daily sync with a 403
+	// "Technical Difficulties" page for days while the Worker ran from overseas
+	// colos (cf-ray ...-CDG), even with browser-like headers. The cf-ray suffix
+	// in a fetch failure shows which colo actually made the request.
+	"placement": {
+		"mode": "targeted",
+		"hostname": "www.kuronekoyamato.co.jp"
+	},
 	"triggers": {
 		"crons": [
 			// Daily carrier sync: 09:00 JST.

@@ -66,16 +66,58 @@ test("describeHttpFailure cannot produce Google Chat mentions or links", async (
 
 test("fetchYamatoStatus puts the failure details in its error", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(AKAMAI_DENIED_PAGE, {
-    status: 403,
-    statusText: "Forbidden",
-    headers: { server: "AkamaiGHost" },
-  });
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(AKAMAI_DENIED_PAGE, {
+      status: 403,
+      statusText: "Forbidden",
+      headers: { server: "AkamaiGHost" },
+    });
+  };
   try {
     await assert.rejects(
-      fetchYamatoStatus(),
-      /Yamato fetch failed: 403 Forbidden \[server=AkamaiGHost; [^\]]*\] body="Access Denied/,
+      fetchYamatoStatus({ retryDelayMs: 0 }),
+      /Yamato fetch failed after 2 attempts: 403 Forbidden \[server=AkamaiGHost; [^\]]*\] body="Access Denied/,
     );
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchYamatoStatus sends browser-like headers and recovers on retry", async () => {
+  const originalFetch = globalThis.fetch;
+  const seenHeaders: Headers[] = [];
+  globalThis.fetch = async (_input, init) => {
+    seenHeaders.push(new Headers(init?.headers));
+    if (seenHeaders.length === 1) return new Response("Technical Difficulties", { status: 403 });
+    return new Response(
+      "<p>●荷受けを停止している地域</p><table><tr><th>都道府県</th><th>備考</th></tr><tr><td>石川県</td><td>荷受け停止</td></tr></table>",
+      { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+    );
+  };
+  try {
+    const source = await fetchYamatoStatus({ retryDelayMs: 0 });
+    assert.equal(seenHeaders.length, 2);
+    assert.match(seenHeaders[0].get("user-agent") ?? "", /^Mozilla\/5\.0 /);
+    assert.match(seenHeaders[0].get("accept-language") ?? "", /^ja/);
+    assert.match(source.text, /石川県/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchYamatoStatus does not retry a 404", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response("Not Found", { status: 404, statusText: "Not Found" });
+  };
+  try {
+    await assert.rejects(fetchYamatoStatus({ retryDelayMs: 0 }), /Yamato fetch failed: 404 Not Found/);
+    assert.equal(calls, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
