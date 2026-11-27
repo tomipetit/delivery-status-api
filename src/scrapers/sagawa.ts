@@ -139,6 +139,55 @@ export function parseSagawaArticleBody(xml: string, url: string): SourceDocument
   };
 }
 
+/**
+ * The standing status article, お荷物の集配および営業所の営業状況. Unlike the
+ * event notices around it, it lists every area currently affected as of a
+ * stated time, and Sagawa folds earlier event notices into it.
+ */
+const CONSOLIDATED_STATUS_TITLE = /集配および営業所の営業状況/;
+
+export interface SagawaArticleSelection {
+  /** Articles to read: the consolidated article and every notice not older than it. */
+  current: SagawaArticleSummary[];
+  /** The consolidated status article, or null when the list has none. */
+  consolidated: SagawaArticleSummary | null;
+  /** Notices published before the consolidated article, already reflected in it. */
+  superseded: SagawaArticleSummary[];
+}
+
+/**
+ * Drops the notices the consolidated status article has already absorbed.
+ *
+ * Reading every listed article double-counts an area that both an old event
+ * notice and the consolidated article name (with different service or reason
+ * wording, so deduplication does not merge them), and keeps an area alive for
+ * as long as an outdated notice stays listed. A notice dated after the
+ * consolidated article is kept: Sagawa may publish one before updating the
+ * consolidated list. A notice from the same day is kept as well, since the
+ * list carries dates without times. Without a consolidated article every
+ * article is read, as before.
+ */
+export function selectCurrentSagawaArticles(articles: SagawaArticleSummary[]): SagawaArticleSelection {
+  const consolidated = articles
+    .filter(({ title }) => CONSOLIDATED_STATUS_TITLE.test(title))
+    .reduce<SagawaArticleSummary | null>(
+      (latest, article) => (latest === null || article.publishedAt > latest.publishedAt ? article : latest),
+      null,
+    );
+  if (consolidated === null) return { current: articles, consolidated: null, superseded: [] };
+
+  const current: SagawaArticleSummary[] = [];
+  const superseded: SagawaArticleSummary[] = [];
+  for (const article of articles) {
+    if (article === consolidated || article.publishedAt >= consolidated.publishedAt) {
+      current.push(article);
+    } else {
+      superseded.push(article);
+    }
+  }
+  return { current, consolidated, superseded };
+}
+
 export async function fetchSagawaArticleList(): Promise<SagawaArticleSummary[]> {
   const response = await fetch(SAGAWA_ARTICLE_LIST_XML_URL, {
     headers: { "user-agent": "delivery-status-api/0.1" },
